@@ -1,0 +1,43 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "User Profile",
+      "description": "Stores user onboarding information.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "Firebase Auth UID" },
+        "name": { "type": "string", "description": "User's display name" },
+        "city": { "type": "string", "description": "User's city (optional)" },
+        "contactType": { "type": "string", "enum": ["whatsapp", "telegram", "email"], "description": "Preferred contact method" },
+        "contactValue": { "type": "string", "description": "Contact details (phone or email)" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "name", "contactType", "contactValue"]
+    },
+    "Thought": {
+      "title": "Thought",
+      "description": "A short thought shared by a user.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "Author's UID" },
+        "authorName": { "type": "string", "description": "Author's name at time of posting" },
+        "authorCity": { "type": "string", "description": "Author's city at time of posting" },
+        "text": { "type": "string", "description": "The thought content (max 180 chars)" },
+        "contactType": { "type": "string", "enum": ["whatsapp", "telegram", "email"] },
+        "contactValue": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "authorName", "text", "contactType", "contactValue", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{uid}": {
+      "schema": "UserProfile",
+      "description": "User profiles"
+    },
+    "/thoughts/{thoughtId}": {
+      "schema": "Thought",
+      "description": "Global feed of thoughts"
+    }
+  }
+}
