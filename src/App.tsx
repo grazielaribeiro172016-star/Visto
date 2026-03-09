@@ -127,11 +127,11 @@ const Login = () => {
   );
 };
 
-const Onboarding = ({ user, onComplete }: { user: User, onComplete: (profile: UserProfile) => void }) => {
-  const [name, setName] = useState(user.displayName || '');
-  const [city, setCity] = useState('');
-  const [contactType, setContactType] = useState<ContactType>('whatsapp');
-  const [contactValue, setContactValue] = useState('');
+const Onboarding = ({ user, onComplete, initialProfile }: { user: User, onComplete: (profile: UserProfile) => void, initialProfile?: UserProfile | null }) => {
+  const [name, setName] = useState(initialProfile?.name || user.displayName || '');
+  const [city, setCity] = useState(initialProfile?.city || '');
+  const [contactType, setContactType] = useState<ContactType>(initialProfile?.contactType || 'whatsapp');
+  const [contactValue, setContactValue] = useState(initialProfile?.contactValue || '');
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -210,16 +210,21 @@ const Onboarding = ({ user, onComplete }: { user: User, onComplete: (profile: Us
           </div>
           <div className="space-y-3">
             <label className="block text-[10px] uppercase tracking-[0.3em] text-visto-muted font-bold">
-              {contactType === 'email' ? 'Seu email' : 'Seu número (com DDD)'}
+              {contactType === 'email' ? 'Seu email' : 'Seu número (com +55 e DDD)'}
             </label>
             <input 
               type={contactType === 'email' ? 'email' : 'text'} 
               value={contactValue} 
               onChange={(e) => setContactValue(e.target.value)}
               className="w-full border-b border-visto-wine/20 py-4 focus:border-visto-wine outline-none bg-transparent transition-all duration-300 placeholder:text-visto-muted/20 text-lg"
-              placeholder={contactType === 'email' ? 'exemplo@email.com' : '11999999999'}
+              placeholder={contactType === 'email' ? 'exemplo@email.com' : '+55 11 99999-9999'}
               required
             />
+            {contactType !== 'email' && (
+              <p className="text-[9px] text-visto-muted/60 uppercase tracking-widest font-medium">
+                Importante: inclua o +55 para que o link funcione corretamente.
+              </p>
+            )}
           </div>
           <button 
             type="submit"
@@ -235,7 +240,13 @@ const Onboarding = ({ user, onComplete }: { user: User, onComplete: (profile: Us
 
 const ThoughtCard = ({ thought, isOwner, onDelete }: { thought: Thought, isOwner?: boolean, onDelete?: (id: string) => void | Promise<void>, key?: any }) => {
   const getContactLink = () => {
-    const val = thought.contactValue.replace(/\D/g, '');
+    let val = thought.contactValue.replace(/\D/g, '');
+    
+    // Auto-fix for Brazilian numbers missing country code
+    if (thought.contactType === 'whatsapp' && (val.length === 10 || val.length === 11) && !val.startsWith('55')) {
+      val = '55' + val;
+    }
+    
     if (thought.contactType === 'whatsapp') return `https://wa.me/${val}`;
     if (thought.contactType === 'telegram') return `https://t.me/${thought.contactValue.replace('@', '')}`;
     return `mailto:${thought.contactValue}`;
@@ -479,7 +490,7 @@ const Feed = ({ userProfile }: { userProfile: UserProfile }) => {
   );
 };
 
-const Profile = ({ userProfile, onSignOut }: { userProfile: UserProfile, onSignOut: () => void }) => {
+const Profile = ({ userProfile, onSignOut, onEdit }: { userProfile: UserProfile, onSignOut: () => void, onEdit: () => void }) => {
   const [myThoughts, setMyThoughts] = useState<Thought[]>([]);
 
   useEffect(() => {
@@ -533,8 +544,15 @@ const Profile = ({ userProfile, onSignOut }: { userProfile: UserProfile, onSignO
           </div>
           
           <button 
+            onClick={onEdit}
+            className="mt-4 px-8 py-3 border border-visto-wine/20 text-visto-wine text-[10px] uppercase tracking-[0.3em] font-bold rounded-full hover:bg-visto-wine hover:text-white transition-all duration-300"
+          >
+            Editar Perfil
+          </button>
+          
+          <button 
             onClick={onSignOut}
-            className="mt-12 px-8 py-3 border border-visto-wine/20 text-visto-wine text-[10px] uppercase tracking-[0.3em] font-bold rounded-full hover:bg-visto-wine hover:text-white transition-all duration-300"
+            className="mt-4 px-8 py-3 border border-visto-wine/20 text-visto-wine text-[10px] uppercase tracking-[0.3em] font-bold rounded-full hover:bg-visto-wine hover:text-white transition-all duration-300"
           >
             Desconectar
           </button>
@@ -569,6 +587,7 @@ export default function App() {
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(true);
   const [showProfile, setShowProfile] = useState(false);
+  const [isEditingProfile, setIsEditingProfile] = useState(false);
   const [error, setError] = useState<any>(null);
 
   useEffect(() => {
@@ -633,8 +652,15 @@ export default function App() {
     <div className="min-h-screen bg-visto-bg selection:bg-visto-wine/10">
       {!user ? (
         <Login />
-      ) : !userProfile ? (
-        <Onboarding user={user} onComplete={setUserProfile} />
+      ) : (!userProfile || isEditingProfile) ? (
+        <Onboarding 
+          user={user} 
+          initialProfile={userProfile}
+          onComplete={(profile) => {
+            setUserProfile(profile);
+            setIsEditingProfile(false);
+          }} 
+        />
       ) : (
         <>
           <Feed userProfile={userProfile} />
@@ -643,6 +669,10 @@ export default function App() {
               <Profile 
                 userProfile={userProfile} 
                 onSignOut={handleSignOut} 
+                onEdit={() => {
+                  setIsEditingProfile(true);
+                  setShowProfile(false);
+                }}
               />
             )}
           </AnimatePresence>
