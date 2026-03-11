@@ -1,13 +1,13 @@
 {
-  "name": "Visto Kappa",
-  "short_name": "VistoKappa",
-  "start_url": "/",
+  "name": "Visto",
+  "short_name": "Visto",
+  "start_url": "https://visto-kappa.vercel.app/",
   "display": "standalone",
   "background_color": "#ffffff",
   "theme_color": "#000000",
   "icons": [
     {
-      "src": "https://visto-kappa.vercel.app/favicon.ico",
+      "src": "https://visto-kappa.vercel.app/icon-512x512.png",
       "sizes": "512x512",
       "type": "image/png"
     }
