@@ -1,8 +1,18 @@
-[{
-  "relation": ["delegate_permission/common.handle_all_urls"],
-  "target": {
-    "namespace": "android_app",
-    "package_name": "app.vercel.visto_kappa.twa",
-    "sha256_cert_fingerprints": ["C4:40:80:9F:4B:E0:CA:40:0D:1A:84:33:B8:DF:8A:9A:3E:DC:F5:B6:95:EC:86:65:AB:5E:6A:14:D7:5C:BE:FF"]
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "app.vercel.visto_kappa.twa",
+      "sha256_cert_fingerprints": ["C4:40:80:9F:4B:E0:CA:40:0D:1A:84:33:B8:DF:8A:9A:3E:DC:F5:B6:95:EC:86:65:AB:5E:6A:14:D7:5C:BE:FF"]
+    }
+  },
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "app.vercel.visto_kappa.twa",
+      "sha256_cert_fingerprints": ["21:1C:78:C2:28:E1:EE:CA:40:C3:57:15:2C:2B:C3:50:EB:CF:1D:79:DC:58:C6:02:77:1A:11:7D:98:1B:CA:AF"]
+    }
   }
-}]
+]
