@@ -1,6 +1,6 @@
 {
   "name": "Visto Kappa",
-  "short_name": "Visto",
+  "short_name": "VistoKappa",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#ffffff",
@@ -9,8 +9,7 @@
     {
       "src": "https://visto-kappa.vercel.app/favicon.ico",
       "sizes": "512x512",
-      "type": "image/png",
-      "purpose": "any maskable"
+      "type": "image/png"
     }
   ]
 }
