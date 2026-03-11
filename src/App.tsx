@@ -248,7 +248,7 @@ const ThoughtCard = ({ thought, isOwner, onDelete }: { thought: Thought, isOwner
     }
 
     // Mensagem automática "Te vi no Visto"
-    const msg = encodeURIComponent('Te vi no Visto! 👁️');
+    const msg = encodeURIComponent('👁️Te vi no Visto!');
     
     if (thought.contactType === 'whatsapp') return `https://wa.me/${val}?text=${msg}`;
     if (thought.contactType === 'telegram') return `https://t.me/${thought.contactValue.replace('@', '')}?text=${msg}`;
