@@ -246,10 +246,13 @@ const ThoughtCard = ({ thought, isOwner, onDelete }: { thought: Thought, isOwner
     if (thought.contactType === 'whatsapp' && (val.length === 10 || val.length === 11) && !val.startsWith('55')) {
       val = '55' + val;
     }
+
+    // Mensagem automática "Te vi no Visto"
+    const msg = encodeURIComponent('Te vi no Visto! 👁️');
     
-    if (thought.contactType === 'whatsapp') return `https://wa.me/${val}`;
-    if (thought.contactType === 'telegram') return `https://t.me/${thought.contactValue.replace('@', '')}`;
-    return `mailto:${thought.contactValue}`;
+    if (thought.contactType === 'whatsapp') return `https://wa.me/${val}?text=${msg}`;
+    if (thought.contactType === 'telegram') return `https://t.me/${thought.contactValue.replace('@', '')}?text=${msg}`;
+    return `mailto:${thought.contactValue}?subject=${msg}`;
   };
 
   return (
