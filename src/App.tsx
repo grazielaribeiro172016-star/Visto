@@ -380,11 +380,15 @@ const ThoughtCard = ({
   const getContactLink = () => {
     if (isSeed || !('contactValue' in thought)) return '#';
     const t = thought as Thought;
+
+    const firstName = t.authorName.split(' ')[0];
+    const msg = `👁 te vi no visto.\n\n"${t.text}"\n\nvi isso no visto e quis falar com você.\n\n— visto-kappa.vercel.app`;
+
     let val = t.contactValue.replace(/\D/g, '');
     if (t.contactType === 'whatsapp' && (val.length === 10 || val.length === 11) && !val.startsWith('55')) val = '55' + val;
-    if (t.contactType === 'whatsapp') return `https://wa.me/${val}`;
+    if (t.contactType === 'whatsapp') return `https://wa.me/${val}?text=${encodeURIComponent(msg)}`;
     if (t.contactType === 'telegram') return `https://t.me/${t.contactValue.replace('@', '')}`;
-    return `mailto:${t.contactValue}`;
+    return `mailto:${t.contactValue}?subject=${encodeURIComponent(`👁 te vi no visto`)}&body=${encodeURIComponent(msg)}`;
   };
 
   const contactIcon = !isSeed && 'contactType' in thought ? (
