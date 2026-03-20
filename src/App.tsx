@@ -387,7 +387,7 @@ const ThoughtCard = ({
     let val = t.contactValue.replace(/\D/g, '');
     if (t.contactType === 'whatsapp' && (val.length === 10 || val.length === 11) && !val.startsWith('55')) val = '55' + val;
     if (t.contactType === 'whatsapp') return `https://wa.me/${val}?text=${encodeURIComponent(msg)}`;
-    if (t.contactType === 'telegram') return `https://t.me/${t.contactValue.replace('@', '')}`;
+    if (t.contactType === 'telegram') { const u = t.contactValue.replace('@', '').trim(); return `tg://resolve?domain=${u}&text=${encodeURIComponent(msg)}`; }
     return `mailto:${t.contactValue}?subject=${encodeURIComponent(`👁 te vi no visto`)}&body=${encodeURIComponent(msg)}`;
   };
 
