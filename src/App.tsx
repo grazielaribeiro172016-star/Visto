@@ -30,10 +30,40 @@ import {
   Trash2,
   MapPin,
   Mail,
-  ChevronLeft
+  ChevronLeft,
+  ImagePlus,
+  X
 } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
+
+
+// ---------------------------------------------------------------------------
+// Utilitário — comprime imagem para base64 (max 800px, qualidade 0.75)
+// ---------------------------------------------------------------------------
+const compressImage = (file: File): Promise<string> =>
+  new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = e => {
+      const img = new Image();
+      img.onload = () => {
+        const MAX = 800;
+        let w = img.width, h = img.height;
+        if (w > MAX || h > MAX) {
+          if (w > h) { h = Math.round((h * MAX) / w); w = MAX; }
+          else { w = Math.round((w * MAX) / h); h = MAX; }
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = w; canvas.height = h;
+        canvas.getContext('2d')!.drawImage(img, 0, 0, w, h);
+        resolve(canvas.toDataURL('image/jpeg', 0.75));
+      };
+      img.onerror = reject;
+      img.src = e.target!.result as string;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
 
 // Pensamentos semente — exibidos quando o feed ainda está vazio
 // Troque por pensamentos reais dos seus primeiros usuários assim que tiver volume
@@ -438,10 +468,28 @@ const ThoughtCard = ({
         )}
       </div>
 
-      {/* Pensamento */}
-      <p className="text-visto-text leading-relaxed mb-10 text-xl font-serif font-light opacity-90 tracking-tight">
-        "{thought.text}"
-      </p>
+      {/* Foto do momento — exibida antes do texto quando presente */}
+      {'imageURL' in thought && thought.imageURL && (
+        <div className="mb-6 -mx-2 rounded-xl overflow-hidden">
+          <img
+            src={thought.imageURL}
+            alt="momento"
+            className="w-full object-cover max-h-80 rounded-xl"
+          />
+          {thought.imageCaption && (
+            <p className="text-[11px] text-visto-muted mt-3 leading-relaxed italic">
+              {thought.imageCaption}
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* Pensamento — só exibe se tiver texto */}
+      {thought.text && (
+        <p className="text-visto-text leading-relaxed mb-10 text-xl font-serif font-light opacity-90 tracking-tight">
+          "{thought.text}"
+        </p>
+      )}
 
       {/* Rodapé */}
       <div className="flex items-center justify-between pt-6 border-t border-visto-wine/8">
@@ -478,10 +526,14 @@ const ThoughtCard = ({
 const Feed = ({ userProfile }: { userProfile: UserProfile }) => {
   const [thoughts, setThoughts] = useState<Thought[]>([]);
   const [showCreate, setShowCreate] = useState(false);
+  const [mode, setMode] = useState<'text' | 'photo'>('text');
   const [text, setText] = useState('');
+  const [imageBase64, setImageBase64] = useState<string | null>(null);
+  const [imageCaption, setImageCaption] = useState('');
   const [loadingFeed, setLoadingFeed] = useState(true);
   const [userTodayCount, setUserTodayCount] = useState(0);
   const [justPosted, setJustPosted] = useState(false);
+  const fileInputRef = React.useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     const q = query(collection(db, 'thoughts'), orderBy('createdAt', 'desc'), limit(50));
@@ -495,21 +547,43 @@ const Feed = ({ userProfile }: { userProfile: UserProfile }) => {
     return unsub;
   }, [userProfile.uid]);
 
+  const handlePickImage = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const compressed = await compressImage(file);
+      setImageBase64(compressed);
+    } catch (err) {
+      console.error('Erro ao comprimir imagem:', err);
+    }
+  };
+
+  const resetCompose = () => {
+    setText('');
+    setImageBase64(null);
+    setImageCaption('');
+    setMode('text');
+    setShowCreate(false);
+  };
+
   const handlePost = async () => {
-    if (!text.trim() || text.length > 180 || userTodayCount >= 3) return;
+    const hasText = text.trim().length > 0;
+    const hasImage = !!imageBase64;
+    if ((!hasText && !hasImage) || userTodayCount >= 3) return;
+    if (hasText && text.length > 180) return;
     try {
       await addDoc(collection(db, 'thoughts'), {
         uid: userProfile.uid,
         authorName: userProfile.name,
         authorCity: userProfile.city || '',
         authorPhotoURL: userProfile.photoURL || '',
-        text: text.trim(),
+        text: hasText ? text.trim() : '',
+        ...(hasImage && { imageURL: imageBase64, imageCaption: imageCaption.trim() }),
         contactType: userProfile.contactType,
         contactValue: userProfile.contactValue,
         createdAt: serverTimestamp(),
       });
-      setText('');
-      setShowCreate(false);
+      resetCompose();
       setJustPosted(true);
       setTimeout(() => setJustPosted(false), 4000);
     } catch (err) {
@@ -608,41 +682,113 @@ const Feed = ({ userProfile }: { userProfile: UserProfile }) => {
             transition={{ duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
             className="fixed inset-0 bg-visto-bg z-50 p-6 md:p-12 flex flex-col overflow-y-auto"
           >
-            <div className="flex justify-between items-center mb-12 shrink-0">
-              <button onClick={() => setShowCreate(false)} className="text-visto-wine hover:opacity-50 transition-opacity">
+            <div className="flex justify-between items-center mb-10 shrink-0">
+              <button onClick={resetCompose} className="text-visto-wine hover:opacity-50 transition-opacity">
                 <ChevronLeft size={36} strokeWidth={1} />
               </button>
               <div className="text-center">
-                <span className="text-[10px] uppercase tracking-[0.5em] text-visto-muted font-medium">novo pensamento</span>
+                <span className="text-[10px] uppercase tracking-[0.5em] text-visto-muted font-medium">
+                  {mode === 'photo' ? 'compartilhar momento' : 'novo pensamento'}
+                </span>
                 <p className="text-[10px] text-visto-muted/40 mt-1">{Math.max(0, 3 - userTodayCount)} restantes hoje</p>
               </div>
               <div className="w-9" />
             </div>
 
+            {/* Seletor de modo */}
+            <div className="flex gap-3 max-w-lg mx-auto w-full mb-10 shrink-0">
+              <button
+                onClick={() => { setMode('text'); setImageBase64(null); setImageCaption(''); }}
+                className={`flex-1 py-2.5 rounded-full text-[11px] font-medium tracking-widest transition-all duration-300 ${mode === 'text' ? 'bg-visto-wine text-white' : 'bg-visto-bg-warm text-visto-muted border border-visto-wine/10'}`}
+              >
+                pensamento
+              </button>
+              <button
+                onClick={() => { setMode('photo'); setText(''); }}
+                className={`flex-1 py-2.5 rounded-full text-[11px] font-medium tracking-widest transition-all duration-300 flex items-center justify-center gap-2 ${mode === 'photo' ? 'bg-visto-wine text-white' : 'bg-visto-bg-warm text-visto-muted border border-visto-wine/10'}`}
+              >
+                <ImagePlus size={13} strokeWidth={1.5} />
+                momento
+              </button>
+            </div>
+
             <div className="flex-1 flex flex-col max-w-lg mx-auto w-full pb-12">
-              <textarea
-                autoFocus
-                value={text}
-                onChange={e => setText(e.target.value)}
-                placeholder="o que está na sua cabeça agora?"
-                className="w-full bg-transparent text-3xl md:text-4xl font-serif text-visto-text placeholder:text-visto-muted/10 outline-none resize-none min-h-[200px] leading-tight font-light tracking-tight"
-                maxLength={180}
-              />
-              <div className="flex justify-between items-center mt-8 border-t border-visto-wine/10 pt-8 shrink-0">
-                <span className={`text-[11px] uppercase tracking-[0.3em] font-medium ${text.length > 160 ? 'text-visto-wine' : 'text-visto-muted/40'}`}>
-                  {text.length} / 180
-                </span>
-              </div>
+
+              {/* Modo texto */}
+              {mode === 'text' && (
+                <>
+                  <textarea
+                    autoFocus
+                    value={text}
+                    onChange={e => setText(e.target.value)}
+                    placeholder="o que está na sua cabeça agora?"
+                    className="w-full bg-transparent text-3xl md:text-4xl font-serif text-visto-text placeholder:text-visto-muted/10 outline-none resize-none min-h-[200px] leading-tight font-light tracking-tight"
+                    maxLength={180}
+                  />
+                  <div className="flex justify-between items-center mt-8 border-t border-visto-wine/10 pt-8 shrink-0">
+                    <span className={`text-[11px] uppercase tracking-[0.3em] font-medium ${text.length > 160 ? 'text-visto-wine' : 'text-visto-muted/40'}`}>
+                      {text.length} / 180
+                    </span>
+                  </div>
+                </>
+              )}
+
+              {/* Modo foto */}
+              {mode === 'photo' && (
+                <>
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    onChange={handlePickImage}
+                  />
+                  {!imageBase64 ? (
+                    <button
+                      onClick={() => fileInputRef.current?.click()}
+                      className="flex flex-col items-center justify-center gap-4 border border-dashed border-visto-wine/20 rounded-2xl min-h-[220px] text-visto-muted hover:border-visto-wine/40 hover:text-visto-wine transition-all duration-300"
+                    >
+                      <ImagePlus size={32} strokeWidth={1} />
+                      <span className="text-[11px] uppercase tracking-[0.3em] font-medium">escolher foto</span>
+                    </button>
+                  ) : (
+                    <div className="relative">
+                      <img src={imageBase64} alt="preview" className="w-full rounded-2xl object-cover max-h-72" />
+                      <button
+                        onClick={() => setImageBase64(null)}
+                        className="absolute top-3 right-3 w-8 h-8 bg-visto-wine/80 text-white rounded-full flex items-center justify-center"
+                      >
+                        <X size={14} strokeWidth={2} />
+                      </button>
+                    </div>
+                  )}
+                  {imageBase64 && (
+                    <textarea
+                      value={imageCaption}
+                      onChange={e => setImageCaption(e.target.value)}
+                      placeholder="o que está acontecendo? (opcional)"
+                      className="w-full bg-transparent text-lg font-serif text-visto-text placeholder:text-visto-muted/20 outline-none resize-none mt-6 leading-relaxed font-light tracking-tight"
+                      maxLength={180}
+                      rows={3}
+                    />
+                  )}
+                </>
+              )}
+
               <button
                 onClick={handlePost}
-                disabled={!text.trim() || userTodayCount >= 3}
-                className="w-full py-5 bg-visto-wine text-white rounded-full font-medium text-sm tracking-wide mt-12 visto-btn-shadow active:scale-[0.98] transition-all duration-300 disabled:opacity-20"
+                disabled={
+                  userTodayCount >= 3 ||
+                  (mode === 'text' && !text.trim()) ||
+                  (mode === 'photo' && !imageBase64)
+                }
+                className="w-full py-5 bg-visto-wine text-white rounded-full font-medium text-sm tracking-wide mt-10 visto-btn-shadow active:scale-[0.98] transition-all duration-300 disabled:opacity-20"
               >
                 publicar
               </button>
               {userTodayCount >= 3 && (
                 <p className="text-center text-[10px] uppercase tracking-[0.3em] text-visto-wine mt-6 font-medium opacity-40">
-                  você já publicou seus 3 pensamentos hoje.
+                  você já publicou seus 3 momentos hoje.
                 </p>
               )}
             </div>
