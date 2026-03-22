@@ -17,11 +17,12 @@ import {
   serverTimestamp,
   deleteDoc,
   where,
-  limit
+  limit,
+  getCountFromServer
 } from 'firebase/firestore';
 import { auth, db } from './firebase';
 import { UserProfile, Thought, ContactType } from './types';
-import { motion, AnimatePresence } from 'motion/react';
+import { motion, AnimatePresence, useMotionValue, useTransform } from 'motion/react';
 import {
   MessageCircle,
   Send,
@@ -31,58 +32,73 @@ import {
   MapPin,
   Mail,
   ChevronLeft,
-  ImagePlus,
-  X,
-  Loader2
+  Eye,
 } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
 
 // ---------------------------------------------------------------------------
-// Compressão agressiva — max 400px, qualidade 0.3
-// Mantém base64 abaixo de ~200KB para caber no limite do Firestore (1MB/doc)
+// Frases de encorajamento — aparecem aleatoriamente no compose
+// Hooked (Nir Eyal) + Building a StoryBrand (Donald Miller)
+// O app é o guia, o usuário é o herói
 // ---------------------------------------------------------------------------
-const compressImage = (file: File): Promise<string> =>
-  new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = e => {
-      const img = new Image();
-      img.onload = () => {
-        const MAX = 400;
-        let w = img.width, h = img.height;
-        if (w > MAX || h > MAX) {
-          if (w > h) { h = Math.round((h * MAX) / w); w = MAX; }
-          else { w = Math.round((w * MAX) / h); h = MAX; }
-        }
-        const canvas = document.createElement('canvas');
-        canvas.width = w; canvas.height = h;
-        canvas.getContext('2d')!.drawImage(img, 0, 0, w, h);
-        const base64 = canvas.toDataURL('image/jpeg', 0.3);
-        // Verifica se ficou abaixo de 700KB em base64 (seguro para o Firestore)
-        if (base64.length > 700_000) {
-          // Segunda passagem com qualidade ainda menor
-          const canvas2 = document.createElement('canvas');
-          const MAX2 = 300;
-          let w2 = w, h2 = h;
-          if (w2 > MAX2 || h2 > MAX2) {
-            if (w2 > h2) { h2 = Math.round((h2 * MAX2) / w2); w2 = MAX2; }
-            else { w2 = Math.round((w2 * MAX2) / h2); h2 = MAX2; }
-          }
-          canvas2.width = w2; canvas2.height = h2;
-          canvas2.getContext('2d')!.drawImage(img, 0, 0, w2, h2);
-          resolve(canvas2.toDataURL('image/jpeg', 0.2));
-        } else {
-          resolve(base64);
-        }
-      };
-      img.onerror = reject;
-      img.src = e.target!.result as string;
-    };
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
+const COMPOSE_NUDGES = [
+  'o que ninguém te perguntou hoje?',
+  'o que você não consegue parar de pensar?',
+  'que pensamento ficou com você essa semana?',
+  'o que você guardaria numa garrafa e jogaria ao mar?',
+  'o que você diria se soubesse que alguém precisa ouvir?',
+  'o que você nunca disse em voz alta?',
+  'que sensação você não consegue nomear?',
+  'o que você percebeu que ninguém mais percebeu?',
+];
 
+// ---------------------------------------------------------------------------
+// Contagem global de pensamentos — Moeda Social (Contagious, Jonah Berger)
+// Faz o usuário sentir que faz parte de algo maior
+// ---------------------------------------------------------------------------
+const useGlobalCount = () => {
+  const [count, setCount] = useState<number | null>(null);
+  useEffect(() => {
+    const q = query(collection(db, 'thoughts'));
+    getCountFromServer(q).then(snap => setCount(snap.data().count)).catch(() => {});
+  }, []);
+  return count;
+};
+
+// ---------------------------------------------------------------------------
+// Streak — Hábitos Atômicos (James Clear) + Hooked (Nir Eyal)
+// Investment loop: quanto mais usa, mais quer continuar
+// ---------------------------------------------------------------------------
+const useStreak = (uid: string) => {
+  const [streak, setStreak] = useState(0);
+  useEffect(() => {
+    if (!uid) return;
+    const q = query(collection(db, 'thoughts'), where('uid', '==', uid), orderBy('createdAt', 'desc'), limit(30));
+    const unsub = onSnapshot(q, snap => {
+      const dates = snap.docs
+        .map(d => d.data().createdAt?.toDate?.())
+        .filter(Boolean)
+        .map((d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime());
+      const unique = [...new Set(dates)].sort((a, b) => b - a);
+      let s = 0;
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      for (let i = 0; i < unique.length; i++) {
+        const expected = today.getTime() - i * 86400000;
+        if (unique[i] === expected) s++;
+        else break;
+      }
+      setStreak(s);
+    });
+    return unsub;
+  }, [uid]);
+  return streak;
+};
+
+// ---------------------------------------------------------------------------
 // Pensamentos semente
+// ---------------------------------------------------------------------------
 const SEED_THOUGHTS: Omit<Thought, 'id' | 'uid' | 'contactType' | 'contactValue'>[] = [
   { authorName: 'Lucas', authorCity: 'São Paulo', text: 'Às vezes me pergunto se as pessoas ao redor sabem o quanto eu realmente penso — e aí percebo que nunca digo em voz alta.', createdAt: null },
   { authorName: 'Marina', authorCity: 'Rio de Janeiro', text: 'Saudade de ter tempo livre sem culpa. Só descansar sem pensar no que deveria estar fazendo.', createdAt: null },
@@ -112,6 +128,7 @@ const Loading = () => (
 // ---------------------------------------------------------------------------
 const Login = () => {
   const [loading, setLoading] = useState(false);
+  const globalCount = useGlobalCount();
 
   const handleLogin = async () => {
     if (loading) return;
@@ -132,9 +149,24 @@ const Login = () => {
   return (
     <div className="flex flex-col items-center justify-center min-h-screen p-10">
       <motion.div variants={stagger} initial="hidden" animate="visible" className="text-center max-w-xs w-full">
-        <motion.h1 variants={item} className="text-9xl font-serif text-visto-wine tracking-tighter mb-3">visto</motion.h1>
-        <motion.p variants={item} className="text-sm text-visto-muted mb-2 font-light tracking-wide leading-relaxed">Você não ganha curtidas aqui.</motion.p>
-        <motion.p variants={item} className="text-sm text-visto-muted mb-16 font-light tracking-wide leading-relaxed">Você ganha conversas.</motion.p>
+        <motion.h1 variants={item} className="text-9xl font-serif text-visto-wine tracking-tighter mb-3">
+          visto
+        </motion.h1>
+
+        {/* Moeda Social — Contagious (Jonah Berger) */}
+        {globalCount !== null && globalCount > 0 && (
+          <motion.p variants={item} className="text-[11px] text-visto-muted/40 uppercase tracking-[0.3em] mb-6 font-medium">
+            {globalCount} pensamento{globalCount !== 1 ? 's' : ''} compartilhado{globalCount !== 1 ? 's' : ''}
+          </motion.p>
+        )}
+
+        <motion.p variants={item} className="text-sm text-visto-muted mb-2 font-light tracking-wide leading-relaxed">
+          Você não ganha curtidas aqui.
+        </motion.p>
+        <motion.p variants={item} className="text-sm text-visto-muted mb-16 font-light tracking-wide leading-relaxed">
+          Você ganha conversas.
+        </motion.p>
+
         <motion.button
           variants={item}
           onClick={handleLogin}
@@ -143,6 +175,7 @@ const Login = () => {
         >
           {loading ? 'conectando...' : 'entrar com Google'}
         </motion.button>
+
         <motion.p variants={item} className="text-[11px] text-visto-muted/50 leading-relaxed">
           sem feed de likes · sem contagem de seguidores<br />só pessoas encontrando pessoas
         </motion.p>
@@ -172,6 +205,8 @@ const Onboarding = ({
   const [contactValue, setContactValue] = useState(initialProfile?.contactValue || '');
   const [saving, setSaving] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  // Nudge aleatório — Don't Make Me Think + Building a StoryBrand
+  const nudge = useRef(COMPOSE_NUDGES[Math.floor(Math.random() * COMPOSE_NUDGES.length)]).current;
 
   useEffect(() => {
     if (step === 0 && textareaRef.current) textareaRef.current.focus();
@@ -235,11 +270,25 @@ const Onboarding = ({
         {step === 0 && (
           <motion.div key="step0" {...fadeUp}>
             <p className="text-[11px] uppercase tracking-[0.4em] text-visto-muted font-medium mb-12">passo 1 de 3</p>
-            <h2 className="text-4xl font-serif text-visto-wine tracking-tighter mb-3 leading-tight">O que está na sua cabeça agora?</h2>
-            <p className="text-visto-muted text-sm mb-10 leading-relaxed">Escreva livremente. Ninguém vai curtir isso — mas alguém pode se identificar de verdade.</p>
-            <textarea ref={textareaRef} value={draftThought} onChange={e => setDraftThought(e.target.value)} maxLength={180} rows={4} placeholder="escreva seu pensamento..." className="w-full bg-visto-bg-warm border border-visto-wine/10 rounded-2xl p-5 text-visto-text font-serif text-xl font-light tracking-tight leading-relaxed outline-none focus:border-visto-wine/30 transition-all duration-300 resize-none placeholder:text-visto-muted/20 mb-3" />
+            <h2 className="text-4xl font-serif text-visto-wine tracking-tighter mb-3 leading-tight">
+              {nudge}
+            </h2>
+            <p className="text-visto-muted text-sm mb-10 leading-relaxed">
+              Escreva livremente. Ninguém vai curtir isso — mas alguém pode se identificar de verdade.
+            </p>
+            <textarea
+              ref={textareaRef}
+              value={draftThought}
+              onChange={e => setDraftThought(e.target.value)}
+              maxLength={180}
+              rows={4}
+              placeholder="escreva seu pensamento..."
+              className="w-full bg-visto-bg-warm border border-visto-wine/10 rounded-2xl p-5 text-visto-text font-serif text-xl font-light tracking-tight leading-relaxed outline-none focus:border-visto-wine/30 transition-all duration-300 resize-none placeholder:text-visto-muted/20 mb-3"
+            />
             <div className="flex justify-between items-center mb-10">
-              <span className={`text-[11px] uppercase tracking-[0.3em] font-medium ${draftThought.length > 160 ? 'text-visto-wine' : 'text-visto-muted/40'}`}>{draftThought.length} / 180</span>
+              <span className={`text-[11px] uppercase tracking-[0.3em] font-medium ${draftThought.length > 160 ? 'text-visto-wine' : 'text-visto-muted/40'}`}>
+                {draftThought.length} / 180
+              </span>
             </div>
             <button onClick={() => setStep(1)} className="w-full py-4 bg-visto-wine text-white rounded-full font-medium text-sm tracking-wide visto-btn-shadow active:scale-[0.98] transition-all duration-200 mb-4">continuar →</button>
             <button onClick={() => setStep(1)} className="w-full py-3 text-visto-muted text-sm hover:text-visto-wine transition-colors duration-200">ainda não sei o que escrever</button>
@@ -250,7 +299,9 @@ const Onboarding = ({
           <motion.div key="step1" {...fadeUp}>
             <p className="text-[11px] uppercase tracking-[0.4em] text-visto-muted font-medium mb-12">passo 2 de 3</p>
             <h2 className="text-4xl font-serif text-visto-wine tracking-tighter mb-3 leading-tight">Como alguém pode te encontrar?</h2>
-            <p className="text-visto-muted text-sm mb-10 leading-relaxed">Se alguém se identificar com o que você escrever, vai usar esse contato para falar com você. Só você vai receber essa mensagem — nunca aparece no feed.</p>
+            <p className="text-visto-muted text-sm mb-10 leading-relaxed">
+              Se alguém se identificar com o que você escrever, vai usar esse contato para falar com você. Nunca aparece no feed.
+            </p>
             <div className="flex gap-3 mb-8">
               {(['whatsapp', 'telegram', 'email'] as ContactType[]).map(type => (
                 <button key={type} type="button" onClick={() => setContactType(type)} className={`flex-1 py-3 rounded-full text-[11px] font-medium tracking-widest transition-all duration-300 ${contactType === type ? 'bg-visto-wine text-white' : 'bg-visto-bg-warm text-visto-muted hover:text-visto-wine border border-visto-wine/10'}`}>{type}</button>
@@ -269,7 +320,7 @@ const Onboarding = ({
           <motion.div key="step2" {...fadeUp}>
             <p className="text-[11px] uppercase tracking-[0.4em] text-visto-muted font-medium mb-12">{initialProfile ? 'editar perfil' : 'passo 3 de 3'}</p>
             <h2 className="text-4xl font-serif text-visto-wine tracking-tighter mb-3 leading-tight">Como você quer ser visto?</h2>
-            <p className="text-visto-muted text-sm mb-10 leading-relaxed">Sem username. Sem @. Só seu nome — como você prefere que as pessoas te chamem.</p>
+            <p className="text-visto-muted text-sm mb-10 leading-relaxed">Sem username. Sem @. Só seu nome.</p>
             <div className="space-y-8 mb-12">
               <div className="space-y-2">
                 <label className="block text-[10px] uppercase tracking-[0.3em] text-visto-muted font-medium">seu nome</label>
@@ -288,14 +339,13 @@ const Onboarding = ({
             )}
           </motion.div>
         )}
-
       </AnimatePresence>
     </div>
   );
 };
 
 // ---------------------------------------------------------------------------
-// ThoughtCard
+// ThoughtCard — com swipe para revelar contato (Don Norman: affordance natural)
 // ---------------------------------------------------------------------------
 const ThoughtCard = ({
   thought,
@@ -308,6 +358,10 @@ const ThoughtCard = ({
   onDelete?: (id: string) => void | Promise<void>;
   isSeed?: boolean;
 }) => {
+  const [revealed, setRevealed] = useState(false);
+  const x = useMotionValue(0);
+  const background = useTransform(x, [-60, 0], ['rgba(100,20,20,0.08)', 'rgba(0,0,0,0)']);
+
   const getContactLink = () => {
     if (isSeed || !('contactValue' in thought)) return '#';
     const t = thought as Thought;
@@ -335,8 +389,12 @@ const ThoughtCard = ({
       initial={{ opacity: 0, y: 10 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.6, ease: 'easeOut' }}
-      className={`p-8 rounded-2xl border mb-8 transition-all duration-500 ${isSeed ? 'bg-visto-bg-warm/50 border-visto-wine/5 opacity-60' : 'bg-visto-bg-warm border-visto-wine/10 hover:border-visto-wine/25'}`}
+      style={{ background }}
+      className={`p-8 rounded-2xl border mb-8 transition-colors duration-500 ${
+        isSeed ? 'bg-visto-bg-warm/50 border-visto-wine/5 opacity-60' : 'bg-visto-bg-warm border-visto-wine/10 hover:border-visto-wine/25'
+      }`}
     >
+      {/* Cabeçalho */}
       <div className="flex justify-between items-start mb-8">
         <div className="flex items-center gap-4">
           {'authorPhotoURL' in thought && thought.authorPhotoURL ? (
@@ -356,20 +414,22 @@ const ThoughtCard = ({
         {timeAgo && <span className="text-[10px] text-visto-muted/30 uppercase tracking-[0.15em] font-medium shrink-0">{timeAgo}</span>}
       </div>
 
-      {'imageURL' in thought && thought.imageURL && (
-        <div className="mb-6 -mx-2 rounded-xl overflow-hidden">
-          <img src={thought.imageURL} alt="momento" className="w-full object-cover max-h-80 rounded-xl" />
-          {thought.imageCaption && <p className="text-[11px] text-visto-muted mt-3 leading-relaxed italic">{thought.imageCaption}</p>}
-        </div>
-      )}
-
+      {/* Texto */}
       {thought.text && (
-        <p className="text-visto-text leading-relaxed mb-10 text-xl font-serif font-light opacity-90 tracking-tight">"{thought.text}"</p>
+        <p className="text-visto-text leading-relaxed mb-10 text-xl font-serif font-light opacity-90 tracking-tight">
+          "{thought.text}"
+        </p>
       )}
 
+      {/* Rodapé */}
       <div className="flex items-center justify-between pt-6 border-t border-visto-wine/8">
         {!isSeed && 'contactType' in thought ? (
-          <a href={getContactLink()} target="_blank" rel="noopener noreferrer" className="flex items-center gap-2 text-[11px] uppercase tracking-[0.3em] font-medium text-visto-wine hover:opacity-50 transition-all duration-200">
+          <a
+            href={getContactLink()}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex items-center gap-2 text-[11px] uppercase tracking-[0.3em] font-medium text-visto-wine hover:opacity-50 transition-all duration-200"
+          >
             {contactIcon}
             falar com {thought.authorName.split(' ')[0]}
           </a>
@@ -387,21 +447,125 @@ const ThoughtCard = ({
 };
 
 // ---------------------------------------------------------------------------
+// ComposeBox — tela de criação de pensamento
+// Tiny Habits (BJ Fogg): menos de 30 segundos para agir
+// Nudge (Thaler): placeholder muda a cada vez que abre
+// ---------------------------------------------------------------------------
+const ComposeBox = ({
+  userProfile,
+  userTodayCount,
+  onPosted,
+  onClose,
+}: {
+  userProfile: UserProfile;
+  userTodayCount: number;
+  onPosted: () => void;
+  onClose: () => void;
+}) => {
+  const [text, setText] = useState('');
+  const [posting, setPosting] = useState(false);
+  const nudge = useRef(COMPOSE_NUDGES[Math.floor(Math.random() * COMPOSE_NUDGES.length)]).current;
+  const remaining = 3 - userTodayCount;
+
+  const handlePost = async () => {
+    if (!text.trim() || posting || userTodayCount >= 3) return;
+    setPosting(true);
+    try {
+      await addDoc(collection(db, 'thoughts'), {
+        uid: userProfile.uid,
+        authorName: userProfile.name,
+        authorCity: userProfile.city || '',
+        authorPhotoURL: userProfile.photoURL || '',
+        text: text.trim(),
+        contactType: userProfile.contactType,
+        contactValue: userProfile.contactValue,
+        createdAt: serverTimestamp(),
+      });
+      onPosted();
+    } catch (err) {
+      console.error(err);
+      setPosting(false);
+    }
+  };
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 20 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: 20 }}
+      transition={{ duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
+      className="fixed inset-0 bg-visto-bg z-50 p-6 md:p-12 flex flex-col overflow-y-auto"
+    >
+      <div className="flex justify-between items-center mb-10 shrink-0">
+        <button onClick={onClose} disabled={posting} className="text-visto-wine hover:opacity-50 transition-opacity disabled:opacity-30">
+          <ChevronLeft size={36} strokeWidth={1} />
+        </button>
+        <div className="text-center">
+          <span className="text-[10px] uppercase tracking-[0.5em] text-visto-muted font-medium">novo pensamento</span>
+          {/* Streak — Hábitos Atômicos */}
+          <p className="text-[10px] text-visto-muted/40 mt-1">
+            {remaining > 0 ? `${remaining} restante${remaining !== 1 ? 's' : ''} hoje` : 'limite diário atingido'}
+          </p>
+        </div>
+        <div className="w-9" />
+      </div>
+
+      <div className="flex-1 flex flex-col max-w-lg mx-auto w-full pb-12">
+        {/* Nudge como título — Building a StoryBrand */}
+        <p className="text-[11px] uppercase tracking-[0.35em] text-visto-muted/50 font-medium mb-6">{nudge}</p>
+
+        <textarea
+          autoFocus
+          value={text}
+          onChange={e => setText(e.target.value)}
+          placeholder="..."
+          className="w-full bg-transparent text-3xl md:text-4xl font-serif text-visto-text placeholder:text-visto-muted/10 outline-none resize-none min-h-[200px] leading-tight font-light tracking-tight"
+          maxLength={180}
+          disabled={posting || userTodayCount >= 3}
+        />
+
+        <div className="flex justify-between items-center mt-8 border-t border-visto-wine/10 pt-8 shrink-0">
+          <span className={`text-[11px] uppercase tracking-[0.3em] font-medium ${text.length > 160 ? 'text-visto-wine' : 'text-visto-muted/40'}`}>
+            {text.length} / 180
+          </span>
+          {/* Barra de progresso do texto — Hooked: recompensa variável */}
+          <div className="w-24 h-0.5 bg-visto-wine/10 rounded-full overflow-hidden">
+            <motion.div
+              className="h-full bg-visto-wine rounded-full"
+              animate={{ width: `${(text.length / 180) * 100}%` }}
+              transition={{ duration: 0.2 }}
+            />
+          </div>
+        </div>
+
+        <button
+          onClick={handlePost}
+          disabled={posting || !text.trim() || userTodayCount >= 3}
+          className="w-full py-5 bg-visto-wine text-white rounded-full font-medium text-sm tracking-wide mt-10 visto-btn-shadow active:scale-[0.98] transition-all duration-300 disabled:opacity-20"
+        >
+          {posting ? 'publicando...' : 'publicar'}
+        </button>
+
+        {userTodayCount >= 3 && (
+          <p className="text-center text-[10px] uppercase tracking-[0.3em] text-visto-wine mt-6 font-medium opacity-40">
+            você já publicou seus 3 pensamentos hoje. volte amanhã.
+          </p>
+        )}
+      </div>
+    </motion.div>
+  );
+};
+
+// ---------------------------------------------------------------------------
 // Feed
 // ---------------------------------------------------------------------------
 const Feed = ({ userProfile }: { userProfile: UserProfile }) => {
   const [thoughts, setThoughts] = useState<Thought[]>([]);
   const [showCreate, setShowCreate] = useState(false);
-  const [mode, setMode] = useState<'text' | 'photo'>('text');
-  const [text, setText] = useState('');
-  const [imageBase64, setImageBase64] = useState<string | null>(null);
-  const [imageCaption, setImageCaption] = useState('');
   const [loadingFeed, setLoadingFeed] = useState(true);
-  const [posting, setPosting] = useState(false);
   const [userTodayCount, setUserTodayCount] = useState(0);
   const [justPosted, setJustPosted] = useState(false);
-  const [sizeError, setSizeError] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const streak = useStreak(userProfile.uid);
 
   useEffect(() => {
     const q = query(collection(db, 'thoughts'), orderBy('createdAt', 'desc'), limit(50));
@@ -415,62 +579,6 @@ const Feed = ({ userProfile }: { userProfile: UserProfile }) => {
     return unsub;
   }, [userProfile.uid]);
 
-  const handlePickImage = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    setSizeError(false);
-    try {
-      const compressed = await compressImage(file);
-      // Rejeita se ainda passar de 700KB após compressão dupla
-      if (compressed.length > 700_000) {
-        setSizeError(true);
-        setImageBase64(null);
-        return;
-      }
-      setImageBase64(compressed);
-    } catch (err) {
-      console.error('Erro ao comprimir imagem:', err);
-    }
-  };
-
-  const resetCompose = () => {
-    setText('');
-    setImageBase64(null);
-    setImageCaption('');
-    setMode('text');
-    setShowCreate(false);
-    setPosting(false);
-    setSizeError(false);
-  };
-
-  const handlePost = async () => {
-    const hasText = text.trim().length > 0;
-    const hasImage = !!imageBase64;
-    if ((!hasText && !hasImage) || userTodayCount >= 3 || posting) return;
-    if (hasText && text.length > 180) return;
-
-    setPosting(true);
-    try {
-      await addDoc(collection(db, 'thoughts'), {
-        uid: userProfile.uid,
-        authorName: userProfile.name,
-        authorCity: userProfile.city || '',
-        authorPhotoURL: userProfile.photoURL || '',
-        ...(hasText && { text: text.trim() }),
-        ...(hasImage && { imageURL: imageBase64, imageCaption: imageCaption.trim() }),
-        contactType: userProfile.contactType,
-        contactValue: userProfile.contactValue,
-        createdAt: serverTimestamp(),
-      });
-      resetCompose();
-      setJustPosted(true);
-      setTimeout(() => setJustPosted(false), 4000);
-    } catch (err) {
-      console.error('Erro ao publicar:', err);
-      setPosting(false);
-    }
-  };
-
   const displayThoughts = thoughts.length > 0 ? thoughts : [];
   const showSeeds = thoughts.length === 0 && !loadingFeed;
 
@@ -478,9 +586,26 @@ const Feed = ({ userProfile }: { userProfile: UserProfile }) => {
 
   return (
     <div className="max-w-xl mx-auto px-8 pb-32">
+      {/* Header */}
       <header className="flex justify-between items-center py-16 mb-8">
-        <h1 className="text-6xl font-serif text-visto-wine tracking-tighter">visto</h1>
-        <button onClick={() => window.dispatchEvent(new CustomEvent('show-profile'))} className="text-visto-wine opacity-40 hover:opacity-100 transition-all duration-500">
+        <div className="flex items-center gap-4">
+          <h1 className="text-6xl font-serif text-visto-wine tracking-tighter">visto</h1>
+          {/* Streak badge — Hábitos Atômicos (James Clear) */}
+          {streak >= 2 && (
+            <motion.div
+              initial={{ scale: 0, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              className="flex flex-col items-center"
+            >
+              <span className="text-lg">🔥</span>
+              <span className="text-[9px] uppercase tracking-[0.2em] text-visto-wine/50 font-medium -mt-1">{streak}d</span>
+            </motion.div>
+          )}
+        </div>
+        <button
+          onClick={() => window.dispatchEvent(new CustomEvent('show-profile'))}
+          className="text-visto-wine opacity-40 hover:opacity-100 transition-all duration-500"
+        >
           {userProfile.photoURL ? (
             <div className="w-8 h-8 rounded-full overflow-hidden border border-visto-wine/10">
               <img src={userProfile.photoURL} alt={userProfile.name} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
@@ -489,18 +614,42 @@ const Feed = ({ userProfile }: { userProfile: UserProfile }) => {
         </button>
       </header>
 
+      {/* Toast pós-postagem — com mensagem variável (Hooked: recompensa variável) */}
       <AnimatePresence>
         {justPosted && (
-          <motion.div initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }} transition={{ duration: 0.4 }} className="mb-8 px-6 py-4 bg-visto-bg-warm border border-visto-wine/15 rounded-2xl">
-            <p className="text-sm text-visto-wine font-serif font-light tracking-tight">seu pensamento foi publicado. se alguém se identificar, você vai saber.</p>
+          <motion.div
+            initial={{ opacity: 0, y: -8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -8 }}
+            transition={{ duration: 0.4 }}
+            className="mb-8 px-6 py-4 bg-visto-bg-warm border border-visto-wine/15 rounded-2xl"
+          >
+            <p className="text-sm text-visto-wine font-serif font-light tracking-tight">
+              {streak >= 3
+                ? `${streak} dias seguidos. alguém vai te ver.`
+                : 'seu pensamento foi publicado. se alguém se identificar, você vai saber.'}
+            </p>
           </motion.div>
         )}
       </AnimatePresence>
 
-      <motion.p initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 1 }} className="text-visto-wine font-serif text-xl font-light opacity-50 tracking-tight mb-16">
-        o que as pessoas estão pensando agora.
+      {/* Subtítulo — varia com o horário do dia */}
+      <motion.p
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        transition={{ duration: 1 }}
+        className="text-visto-wine font-serif text-xl font-light opacity-50 tracking-tight mb-16"
+      >
+        {(() => {
+          const h = new Date().getHours();
+          if (h < 6) return 'o que as pessoas pensam de madrugada.';
+          if (h < 12) return 'o que as pessoas pensam de manhã.';
+          if (h < 18) return 'o que as pessoas pensam agora.';
+          return 'o que as pessoas pensam essa noite.';
+        })()}
       </motion.p>
 
+      {/* Seeds */}
       {showSeeds && (
         <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.3, duration: 0.8 }}>
           <p className="text-[10px] uppercase tracking-[0.4em] text-visto-muted/40 font-medium mb-8 text-center">primeiros pensamentos do visto</p>
@@ -508,6 +657,7 @@ const Feed = ({ userProfile }: { userProfile: UserProfile }) => {
         </motion.div>
       )}
 
+      {/* Feed real */}
       <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.3, duration: 0.8 }} className="space-y-0">
         {displayThoughts.map(t => (
           <ThoughtCard
@@ -519,133 +669,23 @@ const Feed = ({ userProfile }: { userProfile: UserProfile }) => {
         ))}
       </motion.div>
 
-      {/* Tela de composição */}
+      {/* Compose */}
       <AnimatePresence>
         {showCreate && (
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: 20 }}
-            transition={{ duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
-            className="fixed inset-0 bg-visto-bg z-50 p-6 md:p-12 flex flex-col overflow-y-auto"
-          >
-            <div className="flex justify-between items-center mb-10 shrink-0">
-              <button onClick={resetCompose} disabled={posting} className="text-visto-wine hover:opacity-50 transition-opacity disabled:opacity-30">
-                <ChevronLeft size={36} strokeWidth={1} />
-              </button>
-              <div className="text-center">
-                <span className="text-[10px] uppercase tracking-[0.5em] text-visto-muted font-medium">
-                  {mode === 'photo' ? 'compartilhar momento' : 'novo pensamento'}
-                </span>
-                <p className="text-[10px] text-visto-muted/40 mt-1">{Math.max(0, 3 - userTodayCount)} restantes hoje</p>
-              </div>
-              <div className="w-9" />
-            </div>
-
-            <div className="flex gap-3 max-w-lg mx-auto w-full mb-10 shrink-0">
-              <button
-                onClick={() => { setMode('text'); setImageBase64(null); setImageCaption(''); setSizeError(false); }}
-                disabled={posting}
-                className={`flex-1 py-2.5 rounded-full text-[11px] font-medium tracking-widest transition-all duration-300 ${mode === 'text' ? 'bg-visto-wine text-white' : 'bg-visto-bg-warm text-visto-muted border border-visto-wine/10'}`}
-              >
-                pensamento
-              </button>
-              <button
-                onClick={() => { setMode('photo'); setText(''); setSizeError(false); }}
-                disabled={posting}
-                className={`flex-1 py-2.5 rounded-full text-[11px] font-medium tracking-widest transition-all duration-300 flex items-center justify-center gap-2 ${mode === 'photo' ? 'bg-visto-wine text-white' : 'bg-visto-bg-warm text-visto-muted border border-visto-wine/10'}`}
-              >
-                <ImagePlus size={13} strokeWidth={1.5} />
-                momento
-              </button>
-            </div>
-
-            <div className="flex-1 flex flex-col max-w-lg mx-auto w-full pb-12">
-
-              {mode === 'text' && (
-                <>
-                  <textarea
-                    autoFocus
-                    value={text}
-                    onChange={e => setText(e.target.value)}
-                    placeholder="o que está na sua cabeça agora?"
-                    className="w-full bg-transparent text-3xl md:text-4xl font-serif text-visto-text placeholder:text-visto-muted/10 outline-none resize-none min-h-[200px] leading-tight font-light tracking-tight"
-                    maxLength={180}
-                    disabled={posting}
-                  />
-                  <div className="flex justify-between items-center mt-8 border-t border-visto-wine/10 pt-8 shrink-0">
-                    <span className={`text-[11px] uppercase tracking-[0.3em] font-medium ${text.length > 160 ? 'text-visto-wine' : 'text-visto-muted/40'}`}>
-                      {text.length} / 180
-                    </span>
-                  </div>
-                </>
-              )}
-
-              {mode === 'photo' && (
-                <>
-                  <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handlePickImage} disabled={posting} />
-
-                  {!imageBase64 ? (
-                    <button
-                      onClick={() => { setSizeError(false); fileInputRef.current?.click(); }}
-                      disabled={posting}
-                      className="flex flex-col items-center justify-center gap-4 border border-dashed border-visto-wine/20 rounded-2xl min-h-[220px] text-visto-muted hover:border-visto-wine/40 hover:text-visto-wine transition-all duration-300 disabled:opacity-40"
-                    >
-                      <ImagePlus size={32} strokeWidth={1} />
-                      <span className="text-[11px] uppercase tracking-[0.3em] font-medium">escolher foto</span>
-                    </button>
-                  ) : (
-                    <div className="relative">
-                      <img src={imageBase64} alt="preview" className="w-full rounded-2xl object-cover max-h-72" />
-                      {!posting && (
-                        <button onClick={() => { setImageBase64(null); setSizeError(false); }} className="absolute top-3 right-3 w-8 h-8 bg-visto-wine/80 text-white rounded-full flex items-center justify-center">
-                          <X size={14} strokeWidth={2} />
-                        </button>
-                      )}
-                    </div>
-                  )}
-
-                  {/* Erro de imagem grande demais */}
-                  {sizeError && (
-                    <p className="text-center text-[11px] text-visto-wine mt-4 opacity-70">
-                      essa imagem é grande demais. tente uma foto menor ou tire uma nova.
-                    </p>
-                  )}
-
-                  {imageBase64 && (
-                    <textarea
-                      value={imageCaption}
-                      onChange={e => setImageCaption(e.target.value)}
-                      placeholder="o que está acontecendo? (opcional)"
-                      className="w-full bg-transparent text-lg font-serif text-visto-text placeholder:text-visto-muted/20 outline-none resize-none mt-6 leading-relaxed font-light tracking-tight"
-                      maxLength={180}
-                      rows={3}
-                      disabled={posting}
-                    />
-                  )}
-                </>
-              )}
-
-              <button
-                onClick={handlePost}
-                disabled={posting || userTodayCount >= 3 || (mode === 'text' && !text.trim()) || (mode === 'photo' && !imageBase64)}
-                className="w-full py-5 bg-visto-wine text-white rounded-full font-medium text-sm tracking-wide mt-10 visto-btn-shadow active:scale-[0.98] transition-all duration-300 disabled:opacity-20 flex items-center justify-center gap-2"
-              >
-                {posting ? (
-                  <><Loader2 size={16} strokeWidth={2} className="animate-spin" />publicando...</>
-                ) : 'publicar'}
-              </button>
-
-              {userTodayCount >= 3 && (
-                <p className="text-center text-[10px] uppercase tracking-[0.3em] text-visto-wine mt-6 font-medium opacity-40">
-                  você já publicou seus 3 momentos hoje.
-                </p>
-              )}
-            </div>
-          </motion.div>
+          <ComposeBox
+            userProfile={userProfile}
+            userTodayCount={userTodayCount}
+            onPosted={() => {
+              setShowCreate(false);
+              setJustPosted(true);
+              setTimeout(() => setJustPosted(false), 4000);
+            }}
+            onClose={() => setShowCreate(false)}
+          />
         )}
       </AnimatePresence>
 
+      {/* FAB */}
       {!showCreate && (
         <motion.button
           initial={{ scale: 0, opacity: 0 }}
@@ -675,6 +715,7 @@ const Profile = ({
   onEdit: () => void;
 }) => {
   const [myThoughts, setMyThoughts] = useState<Thought[]>([]);
+  const streak = useStreak(userProfile.uid);
 
   useEffect(() => {
     const q = query(collection(db, 'thoughts'), where('uid', '==', userProfile.uid), orderBy('createdAt', 'desc'));
@@ -703,9 +744,9 @@ const Profile = ({
 
         <div className="text-center mb-20">
           <div className="w-24 h-24 bg-visto-bg-warm rounded-full flex items-center justify-center mx-auto mb-8 border border-visto-wine/10 overflow-hidden">
-            {userProfile.photoURL ? (
-              <img src={userProfile.photoURL} alt={userProfile.name} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
-            ) : <UserIcon size={40} strokeWidth={0.5} className="text-visto-wine opacity-20" />}
+            {userProfile.photoURL
+              ? <img src={userProfile.photoURL} alt={userProfile.name} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+              : <UserIcon size={40} strokeWidth={0.5} className="text-visto-wine opacity-20" />}
           </div>
           <h3 className="text-5xl font-serif text-visto-wine tracking-tighter mb-4">{userProfile.name}</h3>
           <div className="flex flex-col items-center gap-3 text-[10px] uppercase tracking-[0.35em] text-visto-muted font-medium">
@@ -714,6 +755,21 @@ const Profile = ({
             )}
             <span className="opacity-30">{userProfile.contactType}: {userProfile.contactValue}</span>
           </div>
+
+          {/* Stats — Moeda Social (Contagious) */}
+          <div className="flex justify-center gap-8 mt-8 mb-2">
+            <div className="flex flex-col items-center gap-1">
+              <span className="text-2xl font-serif text-visto-wine tracking-tighter">{myThoughts.length}</span>
+              <span className="text-[9px] uppercase tracking-[0.3em] text-visto-muted/50 font-medium">pensamentos</span>
+            </div>
+            {streak >= 1 && (
+              <div className="flex flex-col items-center gap-1">
+                <span className="text-2xl font-serif text-visto-wine tracking-tighter">{streak}🔥</span>
+                <span className="text-[9px] uppercase tracking-[0.3em] text-visto-muted/50 font-medium">dias seguidos</span>
+              </div>
+            )}
+          </div>
+
           <div className="flex justify-center gap-3 mt-6">
             <button onClick={onEdit} className="px-6 py-2.5 border border-visto-wine/20 text-visto-wine text-[10px] uppercase tracking-[0.3em] font-medium rounded-full hover:bg-visto-wine hover:text-white transition-all duration-300">editar</button>
             <button onClick={onSignOut} className="px-6 py-2.5 border border-visto-wine/20 text-visto-wine text-[10px] uppercase tracking-[0.3em] font-medium rounded-full hover:bg-visto-wine hover:text-white transition-all duration-300">sair</button>
