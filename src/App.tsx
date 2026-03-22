@@ -577,7 +577,9 @@ const Feed = ({ userProfile }: { userProfile: UserProfile }) => {
         authorName: userProfile.name,
         authorCity: userProfile.city || '',
         authorPhotoURL: userProfile.photoURL || '',
-        text: hasText ? text.trim() : '',
+        // ✅ CORREÇÃO: só inclui 'text' se houver conteúdo — evita text: '' que
+        // viola a regra do Firestore (campo presente mas vazio não é permitido)
+        ...(hasText && { text: text.trim() }),
         ...(hasImage && { imageURL: imageBase64, imageCaption: imageCaption.trim() }),
         contactType: userProfile.contactType,
         contactValue: userProfile.contactValue,
