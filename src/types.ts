@@ -17,6 +17,8 @@ export interface Thought {
   authorCity?: string;
   authorPhotoURL?: string;
   text: string;
+  imageURL?: string;        // base64 — foto do momento (opcional)
+  imageCaption?: string;    // legenda da foto (opcional, max 180 chars)
   contactType: ContactType;
   contactValue: string;
   createdAt: any;
