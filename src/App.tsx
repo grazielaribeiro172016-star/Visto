@@ -47,7 +47,7 @@ const compressImage = (file: File): Promise<string> =>
     reader.onload = e => {
       const img = new Image();
       img.onload = () => {
-        const MAX = 800;
+        const MAX = 600;
         let w = img.width, h = img.height;
         if (w > MAX || h > MAX) {
           if (w > h) { h = Math.round((h * MAX) / w); w = MAX; }
@@ -56,7 +56,7 @@ const compressImage = (file: File): Promise<string> =>
         const canvas = document.createElement('canvas');
         canvas.width = w; canvas.height = h;
         canvas.getContext('2d')!.drawImage(img, 0, 0, w, h);
-        resolve(canvas.toDataURL('image/jpeg', 0.75));
+        resolve(canvas.toDataURL('image/jpeg', 0.5));
       };
       img.onerror = reject;
       img.src = e.target!.result as string;
