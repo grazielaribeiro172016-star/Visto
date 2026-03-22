@@ -19,13 +19,6 @@ import {
   where,
   limit
 } from 'firebase/firestore';
-import {
-  getStorage,
-  ref,
-  uploadBytes,
-  getDownloadURL,
-  deleteObject
-} from 'firebase/storage';
 import { auth, db } from './firebase';
 import { UserProfile, Thought, ContactType } from './types';
 import { motion, AnimatePresence } from 'motion/react';
@@ -46,22 +39,8 @@ import { formatDistanceToNow } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
 
 // ---------------------------------------------------------------------------
-// Firebase Storage
-// ---------------------------------------------------------------------------
-const storage = getStorage();
-
-// Faz upload da imagem para o Firebase Storage e retorna a URL pública
-const uploadImage = async (file: File, userId: string): Promise<string> => {
-  const compressed = await compressImage(file);
-  const blob = await fetch(compressed).then(r => r.blob());
-  const filename = `moments/${userId}/${Date.now()}.jpg`;
-  const storageRef = ref(storage, filename);
-  await uploadBytes(storageRef, blob, { contentType: 'image/jpeg' });
-  return await getDownloadURL(storageRef);
-};
-
-// ---------------------------------------------------------------------------
-// Utilitário — comprime imagem (max 800px, qualidade 0.7)
+// Compressão agressiva — max 400px, qualidade 0.3
+// Mantém base64 abaixo de ~200KB para caber no limite do Firestore (1MB/doc)
 // ---------------------------------------------------------------------------
 const compressImage = (file: File): Promise<string> =>
   new Promise((resolve, reject) => {
@@ -69,7 +48,7 @@ const compressImage = (file: File): Promise<string> =>
     reader.onload = e => {
       const img = new Image();
       img.onload = () => {
-        const MAX = 800;
+        const MAX = 400;
         let w = img.width, h = img.height;
         if (w > MAX || h > MAX) {
           if (w > h) { h = Math.round((h * MAX) / w); w = MAX; }
@@ -78,7 +57,23 @@ const compressImage = (file: File): Promise<string> =>
         const canvas = document.createElement('canvas');
         canvas.width = w; canvas.height = h;
         canvas.getContext('2d')!.drawImage(img, 0, 0, w, h);
-        resolve(canvas.toDataURL('image/jpeg', 0.7));
+        const base64 = canvas.toDataURL('image/jpeg', 0.3);
+        // Verifica se ficou abaixo de 700KB em base64 (seguro para o Firestore)
+        if (base64.length > 700_000) {
+          // Segunda passagem com qualidade ainda menor
+          const canvas2 = document.createElement('canvas');
+          const MAX2 = 300;
+          let w2 = w, h2 = h;
+          if (w2 > MAX2 || h2 > MAX2) {
+            if (w2 > h2) { h2 = Math.round((h2 * MAX2) / w2); w2 = MAX2; }
+            else { w2 = Math.round((w2 * MAX2) / h2); h2 = MAX2; }
+          }
+          canvas2.width = w2; canvas2.height = h2;
+          canvas2.getContext('2d')!.drawImage(img, 0, 0, w2, h2);
+          resolve(canvas2.toDataURL('image/jpeg', 0.2));
+        } else {
+          resolve(base64);
+        }
       };
       img.onerror = reject;
       img.src = e.target!.result as string;
@@ -399,13 +394,13 @@ const Feed = ({ userProfile }: { userProfile: UserProfile }) => {
   const [showCreate, setShowCreate] = useState(false);
   const [mode, setMode] = useState<'text' | 'photo'>('text');
   const [text, setText] = useState('');
-  const [imageFile, setImageFile] = useState<File | null>(null);
-  const [imagePreview, setImagePreview] = useState<string | null>(null);
+  const [imageBase64, setImageBase64] = useState<string | null>(null);
   const [imageCaption, setImageCaption] = useState('');
   const [loadingFeed, setLoadingFeed] = useState(true);
-  const [uploading, setUploading] = useState(false);
+  const [posting, setPosting] = useState(false);
   const [userTodayCount, setUserTodayCount] = useState(0);
   const [justPosted, setJustPosted] = useState(false);
+  const [sizeError, setSizeError] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -423,58 +418,56 @@ const Feed = ({ userProfile }: { userProfile: UserProfile }) => {
   const handlePickImage = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    setImageFile(file);
+    setSizeError(false);
     try {
-      const preview = await compressImage(file);
-      setImagePreview(preview);
+      const compressed = await compressImage(file);
+      // Rejeita se ainda passar de 700KB após compressão dupla
+      if (compressed.length > 700_000) {
+        setSizeError(true);
+        setImageBase64(null);
+        return;
+      }
+      setImageBase64(compressed);
     } catch (err) {
-      console.error('Erro ao gerar preview:', err);
+      console.error('Erro ao comprimir imagem:', err);
     }
   };
 
   const resetCompose = () => {
     setText('');
-    setImageFile(null);
-    setImagePreview(null);
+    setImageBase64(null);
     setImageCaption('');
     setMode('text');
     setShowCreate(false);
-    setUploading(false);
+    setPosting(false);
+    setSizeError(false);
   };
 
   const handlePost = async () => {
     const hasText = text.trim().length > 0;
-    const hasImage = !!imageFile;
-    if ((!hasText && !hasImage) || userTodayCount >= 3 || uploading) return;
+    const hasImage = !!imageBase64;
+    if ((!hasText && !hasImage) || userTodayCount >= 3 || posting) return;
     if (hasText && text.length > 180) return;
 
-    setUploading(true);
+    setPosting(true);
     try {
-      let imageURL: string | undefined;
-
-      // ✅ Upload para Firebase Storage — só a URL vai para o Firestore
-      if (hasImage && imageFile) {
-        imageURL = await uploadImage(imageFile, userProfile.uid);
-      }
-
       await addDoc(collection(db, 'thoughts'), {
         uid: userProfile.uid,
         authorName: userProfile.name,
         authorCity: userProfile.city || '',
         authorPhotoURL: userProfile.photoURL || '',
         ...(hasText && { text: text.trim() }),
-        ...(imageURL && { imageURL, imageCaption: imageCaption.trim() }),
+        ...(hasImage && { imageURL: imageBase64, imageCaption: imageCaption.trim() }),
         contactType: userProfile.contactType,
         contactValue: userProfile.contactValue,
         createdAt: serverTimestamp(),
       });
-
       resetCompose();
       setJustPosted(true);
       setTimeout(() => setJustPosted(false), 4000);
     } catch (err) {
       console.error('Erro ao publicar:', err);
-      setUploading(false);
+      setPosting(false);
     }
   };
 
@@ -492,9 +485,7 @@ const Feed = ({ userProfile }: { userProfile: UserProfile }) => {
             <div className="w-8 h-8 rounded-full overflow-hidden border border-visto-wine/10">
               <img src={userProfile.photoURL} alt={userProfile.name} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
             </div>
-          ) : (
-            <UserIcon size={24} strokeWidth={1} />
-          )}
+          ) : <UserIcon size={24} strokeWidth={1} />}
         </button>
       </header>
 
@@ -513,7 +504,7 @@ const Feed = ({ userProfile }: { userProfile: UserProfile }) => {
       {showSeeds && (
         <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.3, duration: 0.8 }}>
           <p className="text-[10px] uppercase tracking-[0.4em] text-visto-muted/40 font-medium mb-8 text-center">primeiros pensamentos do visto</p>
-          {SEED_THOUGHTS.map((t, i) => (<ThoughtCard key={i} thought={t as any} isSeed />))}
+          {SEED_THOUGHTS.map((t, i) => <ThoughtCard key={i} thought={t as any} isSeed />)}
         </motion.div>
       )}
 
@@ -523,15 +514,7 @@ const Feed = ({ userProfile }: { userProfile: UserProfile }) => {
             key={t.id}
             thought={t}
             isOwner={t.uid === userProfile.uid}
-            onDelete={async id => {
-              try {
-                const thought = displayThoughts.find(th => th.id === id);
-                if (thought?.imageURL) {
-                  try { await deleteObject(ref(storage, thought.imageURL)); } catch (_) {}
-                }
-                await deleteDoc(doc(db, 'thoughts', id));
-              } catch (e) { console.error(e); }
-            }}
+            onDelete={async id => { try { await deleteDoc(doc(db, 'thoughts', id)); } catch (e) { console.error(e); } }}
           />
         ))}
       </motion.div>
@@ -547,7 +530,7 @@ const Feed = ({ userProfile }: { userProfile: UserProfile }) => {
             className="fixed inset-0 bg-visto-bg z-50 p-6 md:p-12 flex flex-col overflow-y-auto"
           >
             <div className="flex justify-between items-center mb-10 shrink-0">
-              <button onClick={resetCompose} disabled={uploading} className="text-visto-wine hover:opacity-50 transition-opacity disabled:opacity-30">
+              <button onClick={resetCompose} disabled={posting} className="text-visto-wine hover:opacity-50 transition-opacity disabled:opacity-30">
                 <ChevronLeft size={36} strokeWidth={1} />
               </button>
               <div className="text-center">
@@ -561,15 +544,15 @@ const Feed = ({ userProfile }: { userProfile: UserProfile }) => {
 
             <div className="flex gap-3 max-w-lg mx-auto w-full mb-10 shrink-0">
               <button
-                onClick={() => { setMode('text'); setImageFile(null); setImagePreview(null); setImageCaption(''); }}
-                disabled={uploading}
+                onClick={() => { setMode('text'); setImageBase64(null); setImageCaption(''); setSizeError(false); }}
+                disabled={posting}
                 className={`flex-1 py-2.5 rounded-full text-[11px] font-medium tracking-widest transition-all duration-300 ${mode === 'text' ? 'bg-visto-wine text-white' : 'bg-visto-bg-warm text-visto-muted border border-visto-wine/10'}`}
               >
                 pensamento
               </button>
               <button
-                onClick={() => { setMode('photo'); setText(''); }}
-                disabled={uploading}
+                onClick={() => { setMode('photo'); setText(''); setSizeError(false); }}
+                disabled={posting}
                 className={`flex-1 py-2.5 rounded-full text-[11px] font-medium tracking-widest transition-all duration-300 flex items-center justify-center gap-2 ${mode === 'photo' ? 'bg-visto-wine text-white' : 'bg-visto-bg-warm text-visto-muted border border-visto-wine/10'}`}
               >
                 <ImagePlus size={13} strokeWidth={1.5} />
@@ -578,6 +561,7 @@ const Feed = ({ userProfile }: { userProfile: UserProfile }) => {
             </div>
 
             <div className="flex-1 flex flex-col max-w-lg mx-auto w-full pb-12">
+
               {mode === 'text' && (
                 <>
                   <textarea
@@ -587,7 +571,7 @@ const Feed = ({ userProfile }: { userProfile: UserProfile }) => {
                     placeholder="o que está na sua cabeça agora?"
                     className="w-full bg-transparent text-3xl md:text-4xl font-serif text-visto-text placeholder:text-visto-muted/10 outline-none resize-none min-h-[200px] leading-tight font-light tracking-tight"
                     maxLength={180}
-                    disabled={uploading}
+                    disabled={posting}
                   />
                   <div className="flex justify-between items-center mt-8 border-t border-visto-wine/10 pt-8 shrink-0">
                     <span className={`text-[11px] uppercase tracking-[0.3em] font-medium ${text.length > 160 ? 'text-visto-wine' : 'text-visto-muted/40'}`}>
@@ -599,11 +583,12 @@ const Feed = ({ userProfile }: { userProfile: UserProfile }) => {
 
               {mode === 'photo' && (
                 <>
-                  <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handlePickImage} disabled={uploading} />
-                  {!imagePreview ? (
+                  <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handlePickImage} disabled={posting} />
+
+                  {!imageBase64 ? (
                     <button
-                      onClick={() => fileInputRef.current?.click()}
-                      disabled={uploading}
+                      onClick={() => { setSizeError(false); fileInputRef.current?.click(); }}
+                      disabled={posting}
                       className="flex flex-col items-center justify-center gap-4 border border-dashed border-visto-wine/20 rounded-2xl min-h-[220px] text-visto-muted hover:border-visto-wine/40 hover:text-visto-wine transition-all duration-300 disabled:opacity-40"
                     >
                       <ImagePlus size={32} strokeWidth={1} />
@@ -611,15 +596,23 @@ const Feed = ({ userProfile }: { userProfile: UserProfile }) => {
                     </button>
                   ) : (
                     <div className="relative">
-                      <img src={imagePreview} alt="preview" className="w-full rounded-2xl object-cover max-h-72" />
-                      {!uploading && (
-                        <button onClick={() => { setImageFile(null); setImagePreview(null); }} className="absolute top-3 right-3 w-8 h-8 bg-visto-wine/80 text-white rounded-full flex items-center justify-center">
+                      <img src={imageBase64} alt="preview" className="w-full rounded-2xl object-cover max-h-72" />
+                      {!posting && (
+                        <button onClick={() => { setImageBase64(null); setSizeError(false); }} className="absolute top-3 right-3 w-8 h-8 bg-visto-wine/80 text-white rounded-full flex items-center justify-center">
                           <X size={14} strokeWidth={2} />
                         </button>
                       )}
                     </div>
                   )}
-                  {imagePreview && (
+
+                  {/* Erro de imagem grande demais */}
+                  {sizeError && (
+                    <p className="text-center text-[11px] text-visto-wine mt-4 opacity-70">
+                      essa imagem é grande demais. tente uma foto menor ou tire uma nova.
+                    </p>
+                  )}
+
+                  {imageBase64 && (
                     <textarea
                       value={imageCaption}
                       onChange={e => setImageCaption(e.target.value)}
@@ -627,7 +620,7 @@ const Feed = ({ userProfile }: { userProfile: UserProfile }) => {
                       className="w-full bg-transparent text-lg font-serif text-visto-text placeholder:text-visto-muted/20 outline-none resize-none mt-6 leading-relaxed font-light tracking-tight"
                       maxLength={180}
                       rows={3}
-                      disabled={uploading}
+                      disabled={posting}
                     />
                   )}
                 </>
@@ -635,11 +628,11 @@ const Feed = ({ userProfile }: { userProfile: UserProfile }) => {
 
               <button
                 onClick={handlePost}
-                disabled={uploading || userTodayCount >= 3 || (mode === 'text' && !text.trim()) || (mode === 'photo' && !imageFile)}
+                disabled={posting || userTodayCount >= 3 || (mode === 'text' && !text.trim()) || (mode === 'photo' && !imageBase64)}
                 className="w-full py-5 bg-visto-wine text-white rounded-full font-medium text-sm tracking-wide mt-10 visto-btn-shadow active:scale-[0.98] transition-all duration-300 disabled:opacity-20 flex items-center justify-center gap-2"
               >
-                {uploading ? (
-                  <><Loader2 size={16} strokeWidth={2} className="animate-spin" />enviando...</>
+                {posting ? (
+                  <><Loader2 size={16} strokeWidth={2} className="animate-spin" />publicando...</>
                 ) : 'publicar'}
               </button>
 
@@ -712,9 +705,7 @@ const Profile = ({
           <div className="w-24 h-24 bg-visto-bg-warm rounded-full flex items-center justify-center mx-auto mb-8 border border-visto-wine/10 overflow-hidden">
             {userProfile.photoURL ? (
               <img src={userProfile.photoURL} alt={userProfile.name} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
-            ) : (
-              <UserIcon size={40} strokeWidth={0.5} className="text-visto-wine opacity-20" />
-            )}
+            ) : <UserIcon size={40} strokeWidth={0.5} className="text-visto-wine opacity-20" />}
           </div>
           <h3 className="text-5xl font-serif text-visto-wine tracking-tighter mb-4">{userProfile.name}</h3>
           <div className="flex flex-col items-center gap-3 text-[10px] uppercase tracking-[0.35em] text-visto-muted font-medium">
@@ -739,14 +730,7 @@ const Profile = ({
                 key={t.id}
                 thought={t}
                 isOwner
-                onDelete={async id => {
-                  try {
-                    if (t.imageURL) {
-                      try { await deleteObject(ref(storage, t.imageURL)); } catch (_) {}
-                    }
-                    await deleteDoc(doc(db, 'thoughts', id));
-                  } catch (e) { console.error(e); }
-                }}
+                onDelete={async id => { try { await deleteDoc(doc(db, 'thoughts', id)); } catch (e) { console.error(e); } }}
               />
             ))
           )}
