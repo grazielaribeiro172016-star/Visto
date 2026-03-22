@@ -19,6 +19,13 @@ import {
   where,
   limit
 } from 'firebase/firestore';
+import {
+  getStorage,
+  ref,
+  uploadBytes,
+  getDownloadURL,
+  deleteObject
+} from 'firebase/storage';
 import { auth, db } from './firebase';
 import { UserProfile, Thought, ContactType } from './types';
 import { motion, AnimatePresence } from 'motion/react';
@@ -32,14 +39,29 @@ import {
   Mail,
   ChevronLeft,
   ImagePlus,
-  X
+  X,
+  Loader2
 } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
 
+// ---------------------------------------------------------------------------
+// Firebase Storage
+// ---------------------------------------------------------------------------
+const storage = getStorage();
+
+// Faz upload da imagem para o Firebase Storage e retorna a URL pública
+const uploadImage = async (file: File, userId: string): Promise<string> => {
+  const compressed = await compressImage(file);
+  const blob = await fetch(compressed).then(r => r.blob());
+  const filename = `moments/${userId}/${Date.now()}.jpg`;
+  const storageRef = ref(storage, filename);
+  await uploadBytes(storageRef, blob, { contentType: 'image/jpeg' });
+  return await getDownloadURL(storageRef);
+};
 
 // ---------------------------------------------------------------------------
-// Utilitário — comprime imagem para base64 (max 800px, qualidade 0.75)
+// Utilitário — comprime imagem (max 800px, qualidade 0.7)
 // ---------------------------------------------------------------------------
 const compressImage = (file: File): Promise<string> =>
   new Promise((resolve, reject) => {
@@ -47,7 +69,7 @@ const compressImage = (file: File): Promise<string> =>
     reader.onload = e => {
       const img = new Image();
       img.onload = () => {
-        const MAX = 600;
+        const MAX = 800;
         let w = img.width, h = img.height;
         if (w > MAX || h > MAX) {
           if (w > h) { h = Math.round((h * MAX) / w); w = MAX; }
@@ -56,7 +78,7 @@ const compressImage = (file: File): Promise<string> =>
         const canvas = document.createElement('canvas');
         canvas.width = w; canvas.height = h;
         canvas.getContext('2d')!.drawImage(img, 0, 0, w, h);
-        resolve(canvas.toDataURL('image/jpeg', 0.5));
+        resolve(canvas.toDataURL('image/jpeg', 0.7));
       };
       img.onerror = reject;
       img.src = e.target!.result as string;
@@ -65,8 +87,7 @@ const compressImage = (file: File): Promise<string> =>
     reader.readAsDataURL(file);
   });
 
-// Pensamentos semente — exibidos quando o feed ainda está vazio
-// Troque por pensamentos reais dos seus primeiros usuários assim que tiver volume
+// Pensamentos semente
 const SEED_THOUGHTS: Omit<Thought, 'id' | 'uid' | 'contactType' | 'contactValue'>[] = [
   { authorName: 'Lucas', authorCity: 'São Paulo', text: 'Às vezes me pergunto se as pessoas ao redor sabem o quanto eu realmente penso — e aí percebo que nunca digo em voz alta.', createdAt: null },
   { authorName: 'Marina', authorCity: 'Rio de Janeiro', text: 'Saudade de ter tempo livre sem culpa. Só descansar sem pensar no que deveria estar fazendo.', createdAt: null },
@@ -92,7 +113,7 @@ const Loading = () => (
 );
 
 // ---------------------------------------------------------------------------
-// Splash / Login — a proposta em 3 palavras
+// Login
 // ---------------------------------------------------------------------------
 const Login = () => {
   const [loading, setLoading] = useState(false);
@@ -116,17 +137,9 @@ const Login = () => {
   return (
     <div className="flex flex-col items-center justify-center min-h-screen p-10">
       <motion.div variants={stagger} initial="hidden" animate="visible" className="text-center max-w-xs w-full">
-        <motion.h1 variants={item} className="text-9xl font-serif text-visto-wine tracking-tighter mb-3">
-          visto
-        </motion.h1>
-
-        <motion.p variants={item} className="text-sm text-visto-muted mb-2 font-light tracking-wide leading-relaxed">
-          Você não ganha curtidas aqui.
-        </motion.p>
-        <motion.p variants={item} className="text-sm text-visto-muted mb-16 font-light tracking-wide leading-relaxed">
-          Você ganha conversas.
-        </motion.p>
-
+        <motion.h1 variants={item} className="text-9xl font-serif text-visto-wine tracking-tighter mb-3">visto</motion.h1>
+        <motion.p variants={item} className="text-sm text-visto-muted mb-2 font-light tracking-wide leading-relaxed">Você não ganha curtidas aqui.</motion.p>
+        <motion.p variants={item} className="text-sm text-visto-muted mb-16 font-light tracking-wide leading-relaxed">Você ganha conversas.</motion.p>
         <motion.button
           variants={item}
           onClick={handleLogin}
@@ -135,7 +148,6 @@ const Login = () => {
         >
           {loading ? 'conectando...' : 'entrar com Google'}
         </motion.button>
-
         <motion.p variants={item} className="text-[11px] text-visto-muted/50 leading-relaxed">
           sem feed de likes · sem contagem de seguidores<br />só pessoas encontrando pessoas
         </motion.p>
@@ -145,8 +157,7 @@ const Login = () => {
 };
 
 // ---------------------------------------------------------------------------
-// Onboarding — 3 etapas: pensamento → contato → nome
-// A inversão central: o usuário age antes de se cadastrar
+// Onboarding
 // ---------------------------------------------------------------------------
 const Onboarding = ({
   user,
@@ -157,7 +168,6 @@ const Onboarding = ({
   onComplete: (profile: UserProfile) => void;
   initialProfile?: UserProfile | null;
 }) => {
-  // Se está editando um perfil existente, pula direto para o step de nome
   const startStep = initialProfile ? 2 : 0;
   const [step, setStep] = useState(startStep);
   const [draftThought, setDraftThought] = useState('');
@@ -186,7 +196,6 @@ const Onboarding = ({
     };
     try {
       await setDoc(doc(db, 'users', user.uid), profile);
-      // Se o usuário escreveu um pensamento no onboarding, publica junto
       if (draftThought.trim() && !initialProfile) {
         await addDoc(collection(db, 'thoughts'), {
           uid: user.uid,
@@ -228,162 +237,59 @@ const Onboarding = ({
     <div className="max-w-md mx-auto min-h-screen flex flex-col justify-center p-10">
       <AnimatePresence mode="wait">
 
-        {/* ── Step 0: Escrever o primeiro pensamento (antes do cadastro) ── */}
         {step === 0 && (
           <motion.div key="step0" {...fadeUp}>
-            <p className="text-[11px] uppercase tracking-[0.4em] text-visto-muted font-medium mb-12">
-              passo 1 de 3
-            </p>
-            <h2 className="text-4xl font-serif text-visto-wine tracking-tighter mb-3 leading-tight">
-              O que está na sua cabeça agora?
-            </h2>
-            <p className="text-visto-muted text-sm mb-10 leading-relaxed">
-              Escreva livremente. Ninguém vai curtir isso — mas alguém pode se identificar de verdade.
-            </p>
-
-            <textarea
-              ref={textareaRef}
-              value={draftThought}
-              onChange={e => setDraftThought(e.target.value)}
-              maxLength={180}
-              rows={4}
-              placeholder="escreva seu pensamento..."
-              className="w-full bg-visto-bg-warm border border-visto-wine/10 rounded-2xl p-5 text-visto-text font-serif text-xl font-light tracking-tight leading-relaxed outline-none focus:border-visto-wine/30 transition-all duration-300 resize-none placeholder:text-visto-muted/20 mb-3"
-            />
+            <p className="text-[11px] uppercase tracking-[0.4em] text-visto-muted font-medium mb-12">passo 1 de 3</p>
+            <h2 className="text-4xl font-serif text-visto-wine tracking-tighter mb-3 leading-tight">O que está na sua cabeça agora?</h2>
+            <p className="text-visto-muted text-sm mb-10 leading-relaxed">Escreva livremente. Ninguém vai curtir isso — mas alguém pode se identificar de verdade.</p>
+            <textarea ref={textareaRef} value={draftThought} onChange={e => setDraftThought(e.target.value)} maxLength={180} rows={4} placeholder="escreva seu pensamento..." className="w-full bg-visto-bg-warm border border-visto-wine/10 rounded-2xl p-5 text-visto-text font-serif text-xl font-light tracking-tight leading-relaxed outline-none focus:border-visto-wine/30 transition-all duration-300 resize-none placeholder:text-visto-muted/20 mb-3" />
             <div className="flex justify-between items-center mb-10">
-              <span className={`text-[11px] uppercase tracking-[0.3em] font-medium ${draftThought.length > 160 ? 'text-visto-wine' : 'text-visto-muted/40'}`}>
-                {draftThought.length} / 180
-              </span>
+              <span className={`text-[11px] uppercase tracking-[0.3em] font-medium ${draftThought.length > 160 ? 'text-visto-wine' : 'text-visto-muted/40'}`}>{draftThought.length} / 180</span>
             </div>
-
-            <button
-              onClick={() => setStep(1)}
-              className="w-full py-4 bg-visto-wine text-white rounded-full font-medium text-sm tracking-wide visto-btn-shadow active:scale-[0.98] transition-all duration-200 mb-4"
-            >
-              continuar →
-            </button>
-            <button
-              onClick={() => setStep(1)}
-              className="w-full py-3 text-visto-muted text-sm hover:text-visto-wine transition-colors duration-200"
-            >
-              ainda não sei o que escrever
-            </button>
+            <button onClick={() => setStep(1)} className="w-full py-4 bg-visto-wine text-white rounded-full font-medium text-sm tracking-wide visto-btn-shadow active:scale-[0.98] transition-all duration-200 mb-4">continuar →</button>
+            <button onClick={() => setStep(1)} className="w-full py-3 text-visto-muted text-sm hover:text-visto-wine transition-colors duration-200">ainda não sei o que escrever</button>
           </motion.div>
         )}
 
-        {/* ── Step 1: Contato — o pacto de confiança ── */}
         {step === 1 && (
           <motion.div key="step1" {...fadeUp}>
-            <p className="text-[11px] uppercase tracking-[0.4em] text-visto-muted font-medium mb-12">
-              passo 2 de 3
-            </p>
-            <h2 className="text-4xl font-serif text-visto-wine tracking-tighter mb-3 leading-tight">
-              Como alguém pode te encontrar?
-            </h2>
-            <p className="text-visto-muted text-sm mb-10 leading-relaxed">
-              Se alguém se identificar com o que você escrever, vai usar esse contato para falar com você. Só você vai receber essa mensagem — nunca aparece no feed.
-            </p>
-
+            <p className="text-[11px] uppercase tracking-[0.4em] text-visto-muted font-medium mb-12">passo 2 de 3</p>
+            <h2 className="text-4xl font-serif text-visto-wine tracking-tighter mb-3 leading-tight">Como alguém pode te encontrar?</h2>
+            <p className="text-visto-muted text-sm mb-10 leading-relaxed">Se alguém se identificar com o que você escrever, vai usar esse contato para falar com você. Só você vai receber essa mensagem — nunca aparece no feed.</p>
             <div className="flex gap-3 mb-8">
               {(['whatsapp', 'telegram', 'email'] as ContactType[]).map(type => (
-                <button
-                  key={type}
-                  type="button"
-                  onClick={() => setContactType(type)}
-                  className={`flex-1 py-3 rounded-full text-[11px] font-medium tracking-widest transition-all duration-300 ${
-                    contactType === type
-                      ? 'bg-visto-wine text-white'
-                      : 'bg-visto-bg-warm text-visto-muted hover:text-visto-wine border border-visto-wine/10'
-                  }`}
-                >
-                  {type}
-                </button>
+                <button key={type} type="button" onClick={() => setContactType(type)} className={`flex-1 py-3 rounded-full text-[11px] font-medium tracking-widest transition-all duration-300 ${contactType === type ? 'bg-visto-wine text-white' : 'bg-visto-bg-warm text-visto-muted hover:text-visto-wine border border-visto-wine/10'}`}>{type}</button>
               ))}
             </div>
-
             <div className="space-y-2 mb-10">
-              <label className="block text-[10px] uppercase tracking-[0.3em] text-visto-muted font-medium">
-                {contactLabel[contactType]}
-              </label>
-              <input
-                type={contactType === 'email' ? 'email' : 'text'}
-                value={contactValue}
-                onChange={e => setContactValue(e.target.value)}
-                placeholder={contactPlaceholder[contactType]}
-                className="w-full border-b border-visto-wine/20 py-4 focus:border-visto-wine outline-none bg-transparent transition-all duration-300 placeholder:text-visto-muted/20 text-lg"
-                autoFocus
-              />
+              <label className="block text-[10px] uppercase tracking-[0.3em] text-visto-muted font-medium">{contactLabel[contactType]}</label>
+              <input type={contactType === 'email' ? 'email' : 'text'} value={contactValue} onChange={e => setContactValue(e.target.value)} placeholder={contactPlaceholder[contactType]} className="w-full border-b border-visto-wine/20 py-4 focus:border-visto-wine outline-none bg-transparent transition-all duration-300 placeholder:text-visto-muted/20 text-lg" autoFocus />
             </div>
-
-            <button
-              onClick={() => setStep(2)}
-              disabled={!contactValue.trim()}
-              className="w-full py-4 bg-visto-wine text-white rounded-full font-medium text-sm tracking-wide visto-btn-shadow active:scale-[0.98] transition-all duration-200 disabled:opacity-30 mb-4"
-            >
-              continuar →
-            </button>
-            <button
-              onClick={() => setStep(0)}
-              className="w-full py-3 text-visto-muted text-sm hover:text-visto-wine transition-colors duration-200"
-            >
-              ← voltar
-            </button>
+            <button onClick={() => setStep(2)} disabled={!contactValue.trim()} className="w-full py-4 bg-visto-wine text-white rounded-full font-medium text-sm tracking-wide visto-btn-shadow active:scale-[0.98] transition-all duration-200 disabled:opacity-30 mb-4">continuar →</button>
+            <button onClick={() => setStep(0)} className="w-full py-3 text-visto-muted text-sm hover:text-visto-wine transition-colors duration-200">← voltar</button>
           </motion.div>
         )}
 
-        {/* ── Step 2: Nome — o menos que precisamos saber ── */}
         {step === 2 && (
           <motion.div key="step2" {...fadeUp}>
-            <p className="text-[11px] uppercase tracking-[0.4em] text-visto-muted font-medium mb-12">
-              {initialProfile ? 'editar perfil' : 'passo 3 de 3'}
-            </p>
-            <h2 className="text-4xl font-serif text-visto-wine tracking-tighter mb-3 leading-tight">
-              Como você quer ser visto?
-            </h2>
-            <p className="text-visto-muted text-sm mb-10 leading-relaxed">
-              Sem username. Sem @. Só seu nome — como você prefere que as pessoas te chamem.
-            </p>
-
+            <p className="text-[11px] uppercase tracking-[0.4em] text-visto-muted font-medium mb-12">{initialProfile ? 'editar perfil' : 'passo 3 de 3'}</p>
+            <h2 className="text-4xl font-serif text-visto-wine tracking-tighter mb-3 leading-tight">Como você quer ser visto?</h2>
+            <p className="text-visto-muted text-sm mb-10 leading-relaxed">Sem username. Sem @. Só seu nome — como você prefere que as pessoas te chamem.</p>
             <div className="space-y-8 mb-12">
               <div className="space-y-2">
                 <label className="block text-[10px] uppercase tracking-[0.3em] text-visto-muted font-medium">seu nome</label>
-                <input
-                  type="text"
-                  value={name}
-                  onChange={e => setName(e.target.value)}
-                  placeholder="ex: Paulo, P. Nascimento..."
-                  className="w-full border-b border-visto-wine/20 py-4 focus:border-visto-wine outline-none bg-transparent transition-all duration-300 placeholder:text-visto-muted/20 text-lg"
-                  autoFocus
-                />
+                <input type="text" value={name} onChange={e => setName(e.target.value)} placeholder="ex: Paulo, P. Nascimento..." className="w-full border-b border-visto-wine/20 py-4 focus:border-visto-wine outline-none bg-transparent transition-all duration-300 placeholder:text-visto-muted/20 text-lg" autoFocus />
               </div>
               <div className="space-y-2">
-                <label className="block text-[10px] uppercase tracking-[0.3em] text-visto-muted font-medium">
-                  sua cidade <span className="normal-case tracking-normal font-light">(opcional)</span>
-                </label>
-                <input
-                  type="text"
-                  value={city}
-                  onChange={e => setCity(e.target.value)}
-                  placeholder="ex: Porto Alegre"
-                  className="w-full border-b border-visto-wine/20 py-4 focus:border-visto-wine outline-none bg-transparent transition-all duration-300 placeholder:text-visto-muted/20 text-lg"
-                />
+                <label className="block text-[10px] uppercase tracking-[0.3em] text-visto-muted font-medium">sua cidade <span className="normal-case tracking-normal font-light">(opcional)</span></label>
+                <input type="text" value={city} onChange={e => setCity(e.target.value)} placeholder="ex: Porto Alegre" className="w-full border-b border-visto-wine/20 py-4 focus:border-visto-wine outline-none bg-transparent transition-all duration-300 placeholder:text-visto-muted/20 text-lg" />
               </div>
             </div>
-
-            <button
-              onClick={handleSaveProfile}
-              disabled={!name.trim() || !contactValue.trim() || saving}
-              className="w-full py-4 bg-visto-wine text-white rounded-full font-medium text-sm tracking-wide visto-btn-shadow active:scale-[0.98] transition-all duration-200 disabled:opacity-30 mb-4"
-            >
+            <button onClick={handleSaveProfile} disabled={!name.trim() || !contactValue.trim() || saving} className="w-full py-4 bg-visto-wine text-white rounded-full font-medium text-sm tracking-wide visto-btn-shadow active:scale-[0.98] transition-all duration-200 disabled:opacity-30 mb-4">
               {saving ? 'entrando...' : initialProfile ? 'salvar alterações' : 'entrar no visto →'}
             </button>
             {!initialProfile && (
-              <button
-                onClick={() => setStep(1)}
-                className="w-full py-3 text-visto-muted text-sm hover:text-visto-wine transition-colors duration-200"
-              >
-                ← voltar
-              </button>
+              <button onClick={() => setStep(1)} className="w-full py-3 text-visto-muted text-sm hover:text-visto-wine transition-colors duration-200">← voltar</button>
             )}
           </motion.div>
         )}
@@ -410,10 +316,7 @@ const ThoughtCard = ({
   const getContactLink = () => {
     if (isSeed || !('contactValue' in thought)) return '#';
     const t = thought as Thought;
-
-    const firstName = t.authorName.split(' ')[0];
     const msg = `👁 te vi no visto.\n\n"${t.text}"\n\nvi isso no visto e quis falar com você.\n\n— visto-kappa.vercel.app`;
-
     let val = t.contactValue.replace(/\D/g, '');
     if (t.contactType === 'whatsapp' && (val.length === 10 || val.length === 11) && !val.startsWith('55')) val = '55' + val;
     if (t.contactType === 'whatsapp') return `https://wa.me/${val}?text=${encodeURIComponent(msg)}`;
@@ -437,13 +340,8 @@ const ThoughtCard = ({
       initial={{ opacity: 0, y: 10 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.6, ease: 'easeOut' }}
-      className={`p-8 rounded-2xl border mb-8 transition-all duration-500 ${
-        isSeed
-          ? 'bg-visto-bg-warm/50 border-visto-wine/5 opacity-60'
-          : 'bg-visto-bg-warm border-visto-wine/10 hover:border-visto-wine/25'
-      }`}
+      className={`p-8 rounded-2xl border mb-8 transition-all duration-500 ${isSeed ? 'bg-visto-bg-warm/50 border-visto-wine/5 opacity-60' : 'bg-visto-bg-warm border-visto-wine/10 hover:border-visto-wine/25'}`}
     >
-      {/* Cabeçalho */}
       <div className="flex justify-between items-start mb-8">
         <div className="flex items-center gap-4">
           {'authorPhotoURL' in thought && thought.authorPhotoURL ? (
@@ -455,63 +353,36 @@ const ThoughtCard = ({
             <span className="font-serif text-2xl text-visto-wine tracking-tighter leading-none">{thought.authorName}</span>
             {thought.authorCity && (
               <span className="flex items-center gap-1 text-[10px] uppercase tracking-[0.25em] text-visto-muted mt-2 font-medium">
-                <MapPin size={10} strokeWidth={2} />
-                {thought.authorCity}
+                <MapPin size={10} strokeWidth={2} />{thought.authorCity}
               </span>
             )}
           </div>
         </div>
-        {timeAgo && (
-          <span className="text-[10px] text-visto-muted/30 uppercase tracking-[0.15em] font-medium shrink-0">
-            {timeAgo}
-          </span>
-        )}
+        {timeAgo && <span className="text-[10px] text-visto-muted/30 uppercase tracking-[0.15em] font-medium shrink-0">{timeAgo}</span>}
       </div>
 
-      {/* Foto do momento — exibida antes do texto quando presente */}
       {'imageURL' in thought && thought.imageURL && (
         <div className="mb-6 -mx-2 rounded-xl overflow-hidden">
-          <img
-            src={thought.imageURL}
-            alt="momento"
-            className="w-full object-cover max-h-80 rounded-xl"
-          />
-          {thought.imageCaption && (
-            <p className="text-[11px] text-visto-muted mt-3 leading-relaxed italic">
-              {thought.imageCaption}
-            </p>
-          )}
+          <img src={thought.imageURL} alt="momento" className="w-full object-cover max-h-80 rounded-xl" />
+          {thought.imageCaption && <p className="text-[11px] text-visto-muted mt-3 leading-relaxed italic">{thought.imageCaption}</p>}
         </div>
       )}
 
-      {/* Pensamento — só exibe se tiver texto */}
       {thought.text && (
-        <p className="text-visto-text leading-relaxed mb-10 text-xl font-serif font-light opacity-90 tracking-tight">
-          "{thought.text}"
-        </p>
+        <p className="text-visto-text leading-relaxed mb-10 text-xl font-serif font-light opacity-90 tracking-tight">"{thought.text}"</p>
       )}
 
-      {/* Rodapé */}
       <div className="flex items-center justify-between pt-6 border-t border-visto-wine/8">
         {!isSeed && 'contactType' in thought ? (
-          <a
-            href={getContactLink()}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="flex items-center gap-2 text-[11px] uppercase tracking-[0.3em] font-medium text-visto-wine hover:opacity-50 transition-all duration-200"
-          >
+          <a href={getContactLink()} target="_blank" rel="noopener noreferrer" className="flex items-center gap-2 text-[11px] uppercase tracking-[0.3em] font-medium text-visto-wine hover:opacity-50 transition-all duration-200">
             {contactIcon}
             falar com {thought.authorName.split(' ')[0]}
           </a>
         ) : (
           <span className="text-[10px] text-visto-muted/30 uppercase tracking-[0.25em] italic">pensamento semente</span>
         )}
-
         {isOwner && onDelete && 'id' in thought && (
-          <button
-            onClick={() => onDelete((thought as Thought).id)}
-            className="text-visto-wine opacity-20 hover:opacity-70 transition-all duration-300"
-          >
+          <button onClick={() => onDelete((thought as Thought).id)} className="text-visto-wine opacity-20 hover:opacity-70 transition-all duration-300">
             <Trash2 size={14} strokeWidth={1.5} />
           </button>
         )}
@@ -528,12 +399,14 @@ const Feed = ({ userProfile }: { userProfile: UserProfile }) => {
   const [showCreate, setShowCreate] = useState(false);
   const [mode, setMode] = useState<'text' | 'photo'>('text');
   const [text, setText] = useState('');
-  const [imageBase64, setImageBase64] = useState<string | null>(null);
+  const [imageFile, setImageFile] = useState<File | null>(null);
+  const [imagePreview, setImagePreview] = useState<string | null>(null);
   const [imageCaption, setImageCaption] = useState('');
   const [loadingFeed, setLoadingFeed] = useState(true);
+  const [uploading, setUploading] = useState(false);
   const [userTodayCount, setUserTodayCount] = useState(0);
   const [justPosted, setJustPosted] = useState(false);
-  const fileInputRef = React.useRef<HTMLInputElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     const q = query(collection(db, 'thoughts'), orderBy('createdAt', 'desc'), limit(50));
@@ -550,50 +423,61 @@ const Feed = ({ userProfile }: { userProfile: UserProfile }) => {
   const handlePickImage = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    setImageFile(file);
     try {
-      const compressed = await compressImage(file);
-      setImageBase64(compressed);
+      const preview = await compressImage(file);
+      setImagePreview(preview);
     } catch (err) {
-      console.error('Erro ao comprimir imagem:', err);
+      console.error('Erro ao gerar preview:', err);
     }
   };
 
   const resetCompose = () => {
     setText('');
-    setImageBase64(null);
+    setImageFile(null);
+    setImagePreview(null);
     setImageCaption('');
     setMode('text');
     setShowCreate(false);
+    setUploading(false);
   };
 
   const handlePost = async () => {
     const hasText = text.trim().length > 0;
-    const hasImage = !!imageBase64;
-    if ((!hasText && !hasImage) || userTodayCount >= 3) return;
+    const hasImage = !!imageFile;
+    if ((!hasText && !hasImage) || userTodayCount >= 3 || uploading) return;
     if (hasText && text.length > 180) return;
+
+    setUploading(true);
     try {
+      let imageURL: string | undefined;
+
+      // ✅ Upload para Firebase Storage — só a URL vai para o Firestore
+      if (hasImage && imageFile) {
+        imageURL = await uploadImage(imageFile, userProfile.uid);
+      }
+
       await addDoc(collection(db, 'thoughts'), {
         uid: userProfile.uid,
         authorName: userProfile.name,
         authorCity: userProfile.city || '',
         authorPhotoURL: userProfile.photoURL || '',
-        // ✅ CORREÇÃO: só inclui 'text' se houver conteúdo — evita text: '' que
-        // viola a regra do Firestore (campo presente mas vazio não é permitido)
         ...(hasText && { text: text.trim() }),
-        ...(hasImage && { imageURL: imageBase64, imageCaption: imageCaption.trim() }),
+        ...(imageURL && { imageURL, imageCaption: imageCaption.trim() }),
         contactType: userProfile.contactType,
         contactValue: userProfile.contactValue,
         createdAt: serverTimestamp(),
       });
+
       resetCompose();
       setJustPosted(true);
       setTimeout(() => setJustPosted(false), 4000);
     } catch (err) {
-      console.error(err);
+      console.error('Erro ao publicar:', err);
+      setUploading(false);
     }
   };
 
-  // Feed nunca aparece vazio — usa pensamentos semente enquanto não há conteúdo real
   const displayThoughts = thoughts.length > 0 ? thoughts : [];
   const showSeeds = thoughts.length === 0 && !loadingFeed;
 
@@ -601,13 +485,9 @@ const Feed = ({ userProfile }: { userProfile: UserProfile }) => {
 
   return (
     <div className="max-w-xl mx-auto px-8 pb-32">
-      {/* Header */}
       <header className="flex justify-between items-center py-16 mb-8">
         <h1 className="text-6xl font-serif text-visto-wine tracking-tighter">visto</h1>
-        <button
-          onClick={() => window.dispatchEvent(new CustomEvent('show-profile'))}
-          className="text-visto-wine opacity-40 hover:opacity-100 transition-all duration-500"
-        >
+        <button onClick={() => window.dispatchEvent(new CustomEvent('show-profile'))} className="text-visto-wine opacity-40 hover:opacity-100 transition-all duration-500">
           {userProfile.photoURL ? (
             <div className="w-8 h-8 rounded-full overflow-hidden border border-visto-wine/10">
               <img src={userProfile.photoURL} alt={userProfile.name} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
@@ -618,58 +498,40 @@ const Feed = ({ userProfile }: { userProfile: UserProfile }) => {
         </button>
       </header>
 
-      {/* Toast pós-postagem */}
       <AnimatePresence>
         {justPosted && (
-          <motion.div
-            initial={{ opacity: 0, y: -8 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -8 }}
-            transition={{ duration: 0.4 }}
-            className="mb-8 px-6 py-4 bg-visto-bg-warm border border-visto-wine/15 rounded-2xl"
-          >
-            <p className="text-sm text-visto-wine font-serif font-light tracking-tight">
-              seu pensamento foi publicado. se alguém se identificar, você vai saber.
-            </p>
+          <motion.div initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }} transition={{ duration: 0.4 }} className="mb-8 px-6 py-4 bg-visto-bg-warm border border-visto-wine/15 rounded-2xl">
+            <p className="text-sm text-visto-wine font-serif font-light tracking-tight">seu pensamento foi publicado. se alguém se identificar, você vai saber.</p>
           </motion.div>
         )}
       </AnimatePresence>
 
-      {/* Saudação */}
-      <motion.p
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        transition={{ duration: 1 }}
-        className="text-visto-wine font-serif text-xl font-light opacity-50 tracking-tight mb-16"
-      >
+      <motion.p initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 1 }} className="text-visto-wine font-serif text-xl font-light opacity-50 tracking-tight mb-16">
         o que as pessoas estão pensando agora.
       </motion.p>
 
-      {/* Pensamentos semente — visíveis apenas com feed vazio */}
       {showSeeds && (
         <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.3, duration: 0.8 }}>
-          <p className="text-[10px] uppercase tracking-[0.4em] text-visto-muted/40 font-medium mb-8 text-center">
-            primeiros pensamentos do visto
-          </p>
-          {SEED_THOUGHTS.map((t, i) => (
-            <ThoughtCard key={i} thought={t as any} isSeed />
-          ))}
+          <p className="text-[10px] uppercase tracking-[0.4em] text-visto-muted/40 font-medium mb-8 text-center">primeiros pensamentos do visto</p>
+          {SEED_THOUGHTS.map((t, i) => (<ThoughtCard key={i} thought={t as any} isSeed />))}
         </motion.div>
       )}
 
-      {/* Feed real */}
-      <motion.div
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        transition={{ delay: 0.3, duration: 0.8 }}
-        className="space-y-0"
-      >
+      <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.3, duration: 0.8 }} className="space-y-0">
         {displayThoughts.map(t => (
           <ThoughtCard
             key={t.id}
             thought={t}
             isOwner={t.uid === userProfile.uid}
-            onDelete={async id => { try { await deleteDoc(doc(db, 'thoughts', id)); } catch (e) { console.error(e); } }}
+            onDelete={async id => {
+              try {
+                const thought = displayThoughts.find(th => th.id === id);
+                if (thought?.imageURL) {
+                  try { await deleteObject(ref(storage, thought.imageURL)); } catch (_) {}
+                }
+                await deleteDoc(doc(db, 'thoughts', id));
+              } catch (e) { console.error(e); }
+            }}
           />
         ))}
       </motion.div>
@@ -685,7 +547,7 @@ const Feed = ({ userProfile }: { userProfile: UserProfile }) => {
             className="fixed inset-0 bg-visto-bg z-50 p-6 md:p-12 flex flex-col overflow-y-auto"
           >
             <div className="flex justify-between items-center mb-10 shrink-0">
-              <button onClick={resetCompose} className="text-visto-wine hover:opacity-50 transition-opacity">
+              <button onClick={resetCompose} disabled={uploading} className="text-visto-wine hover:opacity-50 transition-opacity disabled:opacity-30">
                 <ChevronLeft size={36} strokeWidth={1} />
               </button>
               <div className="text-center">
@@ -697,16 +559,17 @@ const Feed = ({ userProfile }: { userProfile: UserProfile }) => {
               <div className="w-9" />
             </div>
 
-            {/* Seletor de modo */}
             <div className="flex gap-3 max-w-lg mx-auto w-full mb-10 shrink-0">
               <button
-                onClick={() => { setMode('text'); setImageBase64(null); setImageCaption(''); }}
+                onClick={() => { setMode('text'); setImageFile(null); setImagePreview(null); setImageCaption(''); }}
+                disabled={uploading}
                 className={`flex-1 py-2.5 rounded-full text-[11px] font-medium tracking-widest transition-all duration-300 ${mode === 'text' ? 'bg-visto-wine text-white' : 'bg-visto-bg-warm text-visto-muted border border-visto-wine/10'}`}
               >
                 pensamento
               </button>
               <button
                 onClick={() => { setMode('photo'); setText(''); }}
+                disabled={uploading}
                 className={`flex-1 py-2.5 rounded-full text-[11px] font-medium tracking-widest transition-all duration-300 flex items-center justify-center gap-2 ${mode === 'photo' ? 'bg-visto-wine text-white' : 'bg-visto-bg-warm text-visto-muted border border-visto-wine/10'}`}
               >
                 <ImagePlus size={13} strokeWidth={1.5} />
@@ -715,8 +578,6 @@ const Feed = ({ userProfile }: { userProfile: UserProfile }) => {
             </div>
 
             <div className="flex-1 flex flex-col max-w-lg mx-auto w-full pb-12">
-
-              {/* Modo texto */}
               {mode === 'text' && (
                 <>
                   <textarea
@@ -726,6 +587,7 @@ const Feed = ({ userProfile }: { userProfile: UserProfile }) => {
                     placeholder="o que está na sua cabeça agora?"
                     className="w-full bg-transparent text-3xl md:text-4xl font-serif text-visto-text placeholder:text-visto-muted/10 outline-none resize-none min-h-[200px] leading-tight font-light tracking-tight"
                     maxLength={180}
+                    disabled={uploading}
                   />
                   <div className="flex justify-between items-center mt-8 border-t border-visto-wine/10 pt-8 shrink-0">
                     <span className={`text-[11px] uppercase tracking-[0.3em] font-medium ${text.length > 160 ? 'text-visto-wine' : 'text-visto-muted/40'}`}>
@@ -735,36 +597,29 @@ const Feed = ({ userProfile }: { userProfile: UserProfile }) => {
                 </>
               )}
 
-              {/* Modo foto */}
               {mode === 'photo' && (
                 <>
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    accept="image/*"
-                    className="hidden"
-                    onChange={handlePickImage}
-                  />
-                  {!imageBase64 ? (
+                  <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handlePickImage} disabled={uploading} />
+                  {!imagePreview ? (
                     <button
                       onClick={() => fileInputRef.current?.click()}
-                      className="flex flex-col items-center justify-center gap-4 border border-dashed border-visto-wine/20 rounded-2xl min-h-[220px] text-visto-muted hover:border-visto-wine/40 hover:text-visto-wine transition-all duration-300"
+                      disabled={uploading}
+                      className="flex flex-col items-center justify-center gap-4 border border-dashed border-visto-wine/20 rounded-2xl min-h-[220px] text-visto-muted hover:border-visto-wine/40 hover:text-visto-wine transition-all duration-300 disabled:opacity-40"
                     >
                       <ImagePlus size={32} strokeWidth={1} />
                       <span className="text-[11px] uppercase tracking-[0.3em] font-medium">escolher foto</span>
                     </button>
                   ) : (
                     <div className="relative">
-                      <img src={imageBase64} alt="preview" className="w-full rounded-2xl object-cover max-h-72" />
-                      <button
-                        onClick={() => setImageBase64(null)}
-                        className="absolute top-3 right-3 w-8 h-8 bg-visto-wine/80 text-white rounded-full flex items-center justify-center"
-                      >
-                        <X size={14} strokeWidth={2} />
-                      </button>
+                      <img src={imagePreview} alt="preview" className="w-full rounded-2xl object-cover max-h-72" />
+                      {!uploading && (
+                        <button onClick={() => { setImageFile(null); setImagePreview(null); }} className="absolute top-3 right-3 w-8 h-8 bg-visto-wine/80 text-white rounded-full flex items-center justify-center">
+                          <X size={14} strokeWidth={2} />
+                        </button>
+                      )}
                     </div>
                   )}
-                  {imageBase64 && (
+                  {imagePreview && (
                     <textarea
                       value={imageCaption}
                       onChange={e => setImageCaption(e.target.value)}
@@ -772,6 +627,7 @@ const Feed = ({ userProfile }: { userProfile: UserProfile }) => {
                       className="w-full bg-transparent text-lg font-serif text-visto-text placeholder:text-visto-muted/20 outline-none resize-none mt-6 leading-relaxed font-light tracking-tight"
                       maxLength={180}
                       rows={3}
+                      disabled={uploading}
                     />
                   )}
                 </>
@@ -779,15 +635,14 @@ const Feed = ({ userProfile }: { userProfile: UserProfile }) => {
 
               <button
                 onClick={handlePost}
-                disabled={
-                  userTodayCount >= 3 ||
-                  (mode === 'text' && !text.trim()) ||
-                  (mode === 'photo' && !imageBase64)
-                }
-                className="w-full py-5 bg-visto-wine text-white rounded-full font-medium text-sm tracking-wide mt-10 visto-btn-shadow active:scale-[0.98] transition-all duration-300 disabled:opacity-20"
+                disabled={uploading || userTodayCount >= 3 || (mode === 'text' && !text.trim()) || (mode === 'photo' && !imageFile)}
+                className="w-full py-5 bg-visto-wine text-white rounded-full font-medium text-sm tracking-wide mt-10 visto-btn-shadow active:scale-[0.98] transition-all duration-300 disabled:opacity-20 flex items-center justify-center gap-2"
               >
-                publicar
+                {uploading ? (
+                  <><Loader2 size={16} strokeWidth={2} className="animate-spin" />enviando...</>
+                ) : 'publicar'}
               </button>
+
               {userTodayCount >= 3 && (
                 <p className="text-center text-[10px] uppercase tracking-[0.3em] text-visto-wine mt-6 font-medium opacity-40">
                   você já publicou seus 3 momentos hoje.
@@ -798,7 +653,6 @@ const Feed = ({ userProfile }: { userProfile: UserProfile }) => {
         )}
       </AnimatePresence>
 
-      {/* FAB */}
       {!showCreate && (
         <motion.button
           initial={{ scale: 0, opacity: 0 }}
@@ -865,37 +719,34 @@ const Profile = ({
           <h3 className="text-5xl font-serif text-visto-wine tracking-tighter mb-4">{userProfile.name}</h3>
           <div className="flex flex-col items-center gap-3 text-[10px] uppercase tracking-[0.35em] text-visto-muted font-medium">
             {userProfile.city && (
-              <span className="flex items-center gap-1.5 opacity-40">
-                <MapPin size={12} strokeWidth={2} />{userProfile.city}
-              </span>
+              <span className="flex items-center gap-1.5 opacity-40"><MapPin size={12} strokeWidth={2} />{userProfile.city}</span>
             )}
             <span className="opacity-30">{userProfile.contactType}: {userProfile.contactValue}</span>
           </div>
           <div className="flex justify-center gap-3 mt-6">
-            <button onClick={onEdit} className="px-6 py-2.5 border border-visto-wine/20 text-visto-wine text-[10px] uppercase tracking-[0.3em] font-medium rounded-full hover:bg-visto-wine hover:text-white transition-all duration-300">
-              editar
-            </button>
-            <button onClick={onSignOut} className="px-6 py-2.5 border border-visto-wine/20 text-visto-wine text-[10px] uppercase tracking-[0.3em] font-medium rounded-full hover:bg-visto-wine hover:text-white transition-all duration-300">
-              sair
-            </button>
+            <button onClick={onEdit} className="px-6 py-2.5 border border-visto-wine/20 text-visto-wine text-[10px] uppercase tracking-[0.3em] font-medium rounded-full hover:bg-visto-wine hover:text-white transition-all duration-300">editar</button>
+            <button onClick={onSignOut} className="px-6 py-2.5 border border-visto-wine/20 text-visto-wine text-[10px] uppercase tracking-[0.3em] font-medium rounded-full hover:bg-visto-wine hover:text-white transition-all duration-300">sair</button>
           </div>
         </div>
 
         <div>
-          <p className="text-[10px] uppercase tracking-[0.5em] text-visto-muted font-medium mb-10 border-b border-visto-wine/10 pb-6">
-            seus pensamentos
-          </p>
+          <p className="text-[10px] uppercase tracking-[0.5em] text-visto-muted font-medium mb-10 border-b border-visto-wine/10 pb-6">seus pensamentos</p>
           {myThoughts.length === 0 ? (
-            <p className="text-center py-24 text-visto-muted font-serif text-xl opacity-20 tracking-tight">
-              nenhum pensamento ainda.
-            </p>
+            <p className="text-center py-24 text-visto-muted font-serif text-xl opacity-20 tracking-tight">nenhum pensamento ainda.</p>
           ) : (
             myThoughts.map(t => (
               <ThoughtCard
                 key={t.id}
                 thought={t}
                 isOwner
-                onDelete={async id => { try { await deleteDoc(doc(db, 'thoughts', id)); } catch (e) { console.error(e); } }}
+                onDelete={async id => {
+                  try {
+                    if (t.imageURL) {
+                      try { await deleteObject(ref(storage, t.imageURL)); } catch (_) {}
+                    }
+                    await deleteDoc(doc(db, 'thoughts', id));
+                  } catch (e) { console.error(e); }
+                }}
               />
             ))
           )}
@@ -948,12 +799,8 @@ export default function App() {
   if (error) return (
     <div className="flex flex-col items-center justify-center min-h-screen p-8 text-center bg-visto-bg">
       <h2 className="text-2xl font-serif text-visto-wine mb-4">algo não saiu como esperado.</h2>
-      <p className="text-visto-muted text-sm mb-6 max-w-sm leading-relaxed">
-        ocorreu um erro ao carregar o visto. tente recarregar a página.
-      </p>
-      <button onClick={() => window.location.reload()} className="px-6 py-2.5 border border-visto-wine text-visto-wine text-sm rounded-full hover:bg-visto-wine hover:text-white transition-all duration-300">
-        recarregar
-      </button>
+      <p className="text-visto-muted text-sm mb-6 max-w-sm leading-relaxed">ocorreu um erro ao carregar o visto. tente recarregar a página.</p>
+      <button onClick={() => window.location.reload()} className="px-6 py-2.5 border border-visto-wine text-visto-wine text-sm rounded-full hover:bg-visto-wine hover:text-white transition-all duration-300">recarregar</button>
     </div>
   );
 
