@@ -1,16 +1,15 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    
-    // Helper Functions
+
     function isAuthenticated() {
       return request.auth != null;
     }
-    
+
     function isOwner(userId) {
       return isAuthenticated() && request.auth.uid == userId;
     }
-    
+
     function isValidUser(data) {
       return data.keys().hasAll(['uid', 'name', 'contactType', 'contactValue']) &&
              data.uid == request.auth.uid &&
@@ -18,14 +17,25 @@ service cloud.firestore {
              data.contactType in ['whatsapp', 'telegram', 'email'] &&
              data.contactValue is string && data.contactValue.size() > 0;
     }
-    
+
     function isValidThought(data) {
-      return data.keys().hasAll(['uid', 'authorName', 'text', 'contactType', 'contactValue', 'createdAt']) &&
+      // Campos obrigatórios
+      let hasRequired = data.keys().hasAll(['uid', 'authorName', 'contactType', 'contactValue', 'createdAt']) &&
              data.uid == request.auth.uid &&
-             data.text is string && data.text.size() > 0 && data.text.size() <= 180 &&
              data.authorName is string &&
              data.contactType in ['whatsapp', 'telegram', 'email'] &&
              data.createdAt is timestamp;
+
+      // Pelo menos texto OU imagem deve estar presente
+      let hasContent = (data.keys().hasAny(['text']) && data.text is string && data.text.size() > 0) ||
+                       (data.keys().hasAny(['imageURL']) && data.imageURL is string && data.imageURL.size() > 0);
+
+      // Validações opcionais quando presentes
+      let textOk = !data.keys().hasAny(['text']) || (data.text is string && data.text.size() <= 180);
+      let imageOk = !data.keys().hasAny(['imageURL']) || (data.imageURL is string && data.imageURL.size() <= 500000);
+      let captionOk = !data.keys().hasAny(['imageCaption']) || (data.imageCaption is string && data.imageCaption.size() <= 180);
+
+      return hasRequired && hasContent && textOk && imageOk && captionOk;
     }
 
     // User Profiles
