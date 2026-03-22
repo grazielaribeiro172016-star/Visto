@@ -32,7 +32,7 @@ service cloud.firestore {
 
       // Validações opcionais quando presentes
       let textOk = !data.keys().hasAny(['text']) || (data.text is string && data.text.size() <= 180);
-      let imageOk = !data.keys().hasAny(['imageURL']) || (data.imageURL is string && data.imageURL.size() <= 500000);
+      let imageOk = !data.keys().hasAny(['imageURL']) || (data.imageURL is string && data.imageURL.size() <= 1048487);
       let captionOk = !data.keys().hasAny(['imageCaption']) || (data.imageCaption is string && data.imageCaption.size() <= 180);
 
       return hasRequired && hasContent && textOk && imageOk && captionOk;
@@ -52,3 +52,4 @@ service cloud.firestore {
     }
   }
 }
+
